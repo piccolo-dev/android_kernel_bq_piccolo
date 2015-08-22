@@ -339,6 +339,7 @@ struct smb1360_chip {
 	bool				rsense_10mohm;
 	bool				otg_fet_present;
 	bool				fet_gain_enabled;
+	bool				otp_jeita_cfg;
 	int				otg_fet_enable_gpio;
 
 	/* status tracking */
@@ -1497,6 +1498,86 @@ static int smb1360_battery_is_writeable(struct power_supply *psy,
 	return rc;
 }
 
+// lct.mshuai modify 2015-01-08
+static int BatteryTestStatus_enable = 0;
+
+static ssize_t smb1360_battery_test_status_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	BatteryTestStatus_enable = 1;
+	return sprintf(buf, "%d\n", BatteryTestStatus_enable);
+}
+
+static ssize_t smb1360_battery_test_status_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	int retval;
+	unsigned int input;
+
+	if (sscanf(buf, "%u", &input) != 1) {
+		retval = -EINVAL;
+        BatteryTestStatus_enable = 0;
+		goto exit;
+	}
+
+	if (input != 1) {
+		retval = -EINVAL;
+        BatteryTestStatus_enable = 0;
+		goto exit;
+	}
+
+    BatteryTestStatus_enable = 1;
+
+
+exit:
+	return retval;
+}
+static struct device_attribute attrs[] = {
+	__ATTR(BatteryTestStatus, S_IRUGO | S_IWUSR | S_IWGRP,
+			smb1360_battery_test_status_show,
+			smb1360_battery_test_status_store),
+};
+void runin_work(struct smb1360_chip *chip, int batt_capacity)
+{
+	int rc;
+	static int once_time = 1;
+
+	printk("%s:BatteryTestStatus_enable = %d chip->usb_present = %d \n",
+			__func__,BatteryTestStatus_enable,chip->usb_present);
+
+	if (!chip->usb_present || !BatteryTestStatus_enable)
+		return;
+
+	if (BatteryTestStatus_enable && once_time) {
+		/* safety timer disabled */
+		rc = smb1360_masked_write(chip, CFG_SFY_TIMER_CTRL_REG,
+			SAFETY_TIME_DISABLE_BIT, SAFETY_TIME_DISABLE_BIT);
+	        if (rc < 0)
+			printk("Disable safety timer for runin_test failed\n");
+		else {
+			once_time = 0;
+			printk("Disable safety timer for runin_test sucess\n");
+		}
+	}
+
+	if (batt_capacity >= 80) {
+		pr_debug("smb1360_get_prop_batt_capacity > 80\n");
+		rc = smb1360_charging_disable(chip, USER, true);
+		if (rc)
+			dev_err(chip->dev,
+				"Couldn't disenable charge rc=%d\n", rc);
+	} else {
+		if (batt_capacity < 60) {
+		pr_debug("smb1360_get_prop_batt_capacity < 60\n");
+		rc = smb1360_charging_disable(chip, USER, false);
+		if (rc)
+			dev_err(chip->dev,
+					"Couldn't enable charge rc=%d\n", rc);
+		}
+	}
+}
+// add by lct.mshuai @20150108
+
 static int smb1360_battery_get_property(struct power_supply *psy,
 				       enum power_supply_property prop,
 				       union power_supply_propval *val)
@@ -1522,6 +1603,7 @@ static int smb1360_battery_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		val->intval = smb1360_get_prop_batt_capacity(chip);
+        runin_work(chip, val->intval); // add by lct.mshuai @20150108
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		val->intval = smb1360_get_prop_chg_full_design(chip);
@@ -1788,6 +1870,37 @@ static int usbin_uv_handler(struct smb1360_chip *chip, u8 rt_stat)
 	return 0;
 }
 
+static int usbin_ov_handler(struct smb1360_chip *chip, u8 rt_stat)
+{
+	/*
+	 * rt_stat indicates if usb is overvolted. If so usb_present
+	 * should be marked removed
+	 */
+	bool usb_present = !rt_stat;
+	int health;
+
+	printk("chip->usb_present = %d usb_present = %d\n",
+			chip->usb_present, usb_present);
+	if (chip->usb_present && !usb_present) {
+		/* USB removed */
+		chip->usb_present = usb_present;
+        printk("setting usb psy type = %d\n",
+				POWER_SUPPLY_TYPE_UNKNOWN);
+		power_supply_set_supply_type(chip->usb_psy,
+				POWER_SUPPLY_TYPE_UNKNOWN);
+		power_supply_set_present(chip->usb_psy, usb_present);
+	}
+
+	if (chip->usb_psy) {
+		health = rt_stat ? POWER_SUPPLY_HEALTH_OVERVOLTAGE
+					: POWER_SUPPLY_HEALTH_GOOD;
+        printk("POWER_SUPPLY_HEALTH_OVERVOLTAGE = 5 POWER_SUPPLY_HEALTH_GOOD = 1 health=%d \n", health);
+		power_supply_set_health_state(chip->usb_psy, health);
+	}
+
+	return 0;
+}
+
 static int chg_inhibit_handler(struct smb1360_chip *chip, u8 rt_stat)
 {
 	/*
@@ -1970,6 +2083,32 @@ static int smb1360_adjust_current_gain(struct smb1360_chip *chip,
 	return 0;
 }
 
+static int smb1360_otp_jeita_cfg(struct smb1360_chip *chip)
+{
+	int rc, i;
+	u8 reg_val_mapping[][2] = {
+			{0xE0, 0x13},
+			{0xE1, 0x4B},
+			{0xF0, 0x40},
+	};
+
+	for (i = 0; i < ARRAY_SIZE(reg_val_mapping); i++) {
+
+		pr_debug("Writing reg_add=%x value=%x\n",
+			reg_val_mapping[i][0], reg_val_mapping[i][1]);
+
+		rc = smb1360_fg_write(chip, reg_val_mapping[i][0],
+						reg_val_mapping[i][1]);
+		if (rc) {
+			pr_err("Write fg address 0x%x failed, rc = %d\n",
+					reg_val_mapping[i][0], rc);
+			return rc;
+		}
+	}
+
+	return 0;
+}
+
 static int smb1360_otp_gain_config(struct smb1360_chip *chip, int gain_factor)
 {
 	int rc = 0;
@@ -1987,10 +2126,19 @@ static int smb1360_otp_gain_config(struct smb1360_chip *chip, int gain_factor)
 		goto restore_fg;
 	}
 
-	rc = smb1360_adjust_current_gain(chip, gain_factor);
-	if (rc) {
-		pr_err("Unable to modify current gain rc=%d\n", rc);
-		goto restore_fg;
+	if (chip->rsense_10mohm || chip->otg_fet_present) {
+		rc = smb1360_adjust_current_gain(chip, gain_factor);
+		if (rc) {
+			pr_err("Unable to modify current gain rc=%d\n", rc);
+			goto restore_fg;
+		}
+	}
+	if (chip->otp_jeita_cfg) {
+		rc = smb1360_otp_jeita_cfg(chip);
+		if (rc) {
+			pr_err("Unable configure OTP for JEITA rc=%d\n", rc);
+			goto restore_fg;
+		}
 	}
 
 	rc = smb1360_masked_write(chip, CFG_FG_BATT_CTRL_REG,
@@ -2158,6 +2306,7 @@ static struct irq_handler_info handlers[] = {
 			},
 			{
 				.name		= "usbin_ov",
+                .smb_irq	= usbin_ov_handler,
 			},
 			{
 				.name		= "unused",
@@ -3120,7 +3269,8 @@ disable_fg_reset:
 	 */
 	if (!(chip->workaround_flags & WRKRND_FG_CONFIG_FAIL)) {
 		if (chip->delta_soc != -EINVAL) {
-			reg = abs(((chip->delta_soc * MAX_8_BITS) / 100) - 1);
+//			reg = abs(((chip->delta_soc * MAX_8_BITS) / 100) - 1);
+			reg = 0x01; // optimization for report soc changed irq,please to set "qcom,fg-delta-soc" int dts to open this prop
 			pr_debug("delta_soc=%d reg=%x\n", chip->delta_soc, reg);
 			rc = smb1360_write(chip, SOC_DELTA_REG, reg);
 			if (rc) {
@@ -3504,7 +3654,7 @@ static int smb1360_otp_gain_init(struct smb1360_chip *chip)
 		}
 	}
 
-	if (otp_gain_config) {
+	if (chip->rsense_10mohm || chip->otp_jeita_cfg) {
 		rc = smb1360_otp_gain_config(chip, gain_factor);
 		if (rc < 0)
 			pr_err("Couldn't config OTP gain rc=%d\n", rc);
@@ -4051,6 +4201,9 @@ static int smb_parse_dt(struct smb1360_chip *chip)
 
 	chip->rsense_10mohm = of_property_read_bool(node, "qcom,rsense-10mhom");
 
+	chip->otp_jeita_cfg = of_property_read_bool(node,
+					"qcom,otp-jeita-cfg");
+
 	if (of_property_read_bool(node, "qcom,batt-profile-select")) {
 		rc = smb_parse_batt_id(chip);
 		if (rc < 0) {
@@ -4334,6 +4487,18 @@ static int smb1360_probe(struct i2c_client *client,
 	chip->batt_psy.external_power_changed = smb1360_external_power_changed;
 	chip->batt_psy.property_is_writeable = smb1360_battery_is_writeable;
 
+    // lct.mshuai modify @20150108
+    rc = sysfs_create_file(&chip->client->dev.kobj,
+				&attrs[0].attr);
+	if (rc < 0) {
+		dev_err(&chip->client->dev,
+				"%s: Failed to create sysfs attributes\n",
+				__func__);
+        sysfs_remove_file(&chip->client->dev.kobj,
+				&attrs[0].attr);
+	}
+    // lct.mshuai modify @20150108
+
 	rc = power_supply_register(chip->dev, &chip->batt_psy);
 	if (rc < 0) {
 		dev_err(&client->dev,
@@ -4499,6 +4664,10 @@ static int smb1360_remove(struct i2c_client *client)
 	mutex_destroy(&chip->otp_gain_lock);
 	mutex_destroy(&chip->fg_access_request_lock);
 	debugfs_remove_recursive(chip->debug_root);
+    // add by lct.mshuai @20150108
+    sysfs_remove_file(&chip->client->dev.kobj,
+				&attrs[0].attr);
+    // add by lct.mshuai @20150108
 
 	return 0;
 }
