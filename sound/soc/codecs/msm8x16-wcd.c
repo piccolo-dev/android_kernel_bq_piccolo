@@ -3202,10 +3202,12 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{"IIR2 INP1 MUX", "DEC2", "DEC2 MUX"},
 	{"MIC BIAS Internal1", NULL, "INT_LDO_H"},
 	{"MIC BIAS Internal2", NULL, "INT_LDO_H"},
+	{"MIC BIAS Internal3", NULL, "INT_LDO_H"},
 	{"MIC BIAS External", NULL, "INT_LDO_H"},
 	{"MIC BIAS External2", NULL, "INT_LDO_H"},
 	{"MIC BIAS Internal1", NULL, "MICBIAS_REGULATOR"},
 	{"MIC BIAS Internal2", NULL, "MICBIAS_REGULATOR"},
+	{"MIC BIAS Internal3", NULL, "MICBIAS_REGULATOR"},
 	{"MIC BIAS External", NULL, "MICBIAS_REGULATOR"},
 	{"MIC BIAS External2", NULL, "MICBIAS_REGULATOR"},
 };
@@ -3698,15 +3700,22 @@ static const struct snd_soc_dapm_widget msm8x16_wcd_dapm_widgets[] = {
 		&rx2_mix1_inp1_mux),
 	SND_SOC_DAPM_MUX("RX2 MIX1 INP2", SND_SOC_NOPM, 0, 0,
 		&rx2_mix1_inp2_mux),
+#if defined(CONFIG_AUDIO_CODEC_WM8998_SWITCH)
+// None.	xuke @ 20141212	For CODEC WM8998.
+#else
 	SND_SOC_DAPM_MUX("RX2 MIX1 INP3", SND_SOC_NOPM, 0, 0,
 		&rx2_mix1_inp3_mux),
-
+#endif
 	SND_SOC_DAPM_MUX("RX3 MIX1 INP1", SND_SOC_NOPM, 0, 0,
 		&rx3_mix1_inp1_mux),
 	SND_SOC_DAPM_MUX("RX3 MIX1 INP2", SND_SOC_NOPM, 0, 0,
 		&rx3_mix1_inp2_mux),
+#if defined(CONFIG_AUDIO_CODEC_WM8998_SWITCH)
+// None.	xuke @ 20141212	For CODEC WM8998.
+#else
 	SND_SOC_DAPM_MUX("RX3 MIX1 INP3", SND_SOC_NOPM, 0, 0,
 		&rx3_mix1_inp3_mux),
+#endif
 
 	SND_SOC_DAPM_MUX("RX1 MIX2 INP1", SND_SOC_NOPM, 0, 0,
 		&rx1_mix2_inp1_mux),
@@ -4199,8 +4208,13 @@ static int msm8x16_wcd_codec_probe(struct snd_soc_codec *codec)
 		return ret;
 	}
 
+	printk("yht--At %d In (%s)\n",__LINE__, __FUNCTION__);
+#if defined(CONFIG_AUDIO_CODEC_WM8998_SWITCH)
+// I don't want to create jack by qcom driver
+#else
 	wcd_mbhc_init(&msm8x16_wcd_priv->mbhc, codec, &mbhc_cb, &intr_ids,
 			true);
+#endif
 
 	msm8x16_wcd_priv->mclk_enabled = false;
 	msm8x16_wcd_priv->clock_active = false;
