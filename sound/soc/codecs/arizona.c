@@ -2725,7 +2725,9 @@ static const int arizona_48k_bclk_rates[] = {
 
 static const unsigned int arizona_48k_rates[] = {
 	12000,
+        22050, // yht
 	24000,
+        44100, // yht
 	48000,
 	96000,
 	192000,
