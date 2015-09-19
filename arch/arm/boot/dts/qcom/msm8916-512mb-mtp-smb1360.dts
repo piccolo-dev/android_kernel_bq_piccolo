@@ -59,5 +59,3 @@
 	status = "ok";
 	qcom,disable-bms;
 };
-
-/delete-node/ &mba_mss;
