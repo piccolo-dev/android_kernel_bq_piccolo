@@ -1371,6 +1371,7 @@
 
 		qcom,firmware-name = "modem";
 		qcom,pil-self-auth;
+                qcom,pil-mba-region;
 		qcom,sysmon-id = <0>;
 		qcom,ssctl-instance-id = <0x12>;
 
