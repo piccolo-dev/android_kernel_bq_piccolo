@@ -774,12 +774,6 @@ void pil_shutdown(struct pil_desc *desc)
 		pil_proxy_unvote(desc, 1);
 	else
 		flush_delayed_work(&priv->proxy);
-}
-EXPORT_SYMBOL(pil_shutdown);
-
-void pil_free(struct pil_desc *desc)
-{
-	struct pil_priv *priv = desc->priv;
 
 	if (priv->region) {
 		dma_free_attrs(desc->dev, priv->region_size,
@@ -787,7 +781,7 @@ void pil_free(struct pil_desc *desc)
 		priv->region = NULL;
 	}
 }
-EXPORT_SYMBOL(pil_free);
+EXPORT_SYMBOL(pil_shutdown);
 
 static DEFINE_IDA(pil_ida);
 
