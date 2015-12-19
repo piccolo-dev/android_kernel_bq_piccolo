@@ -264,3 +264,6 @@ config MSM_FD
 	 depends on MSMB_CAMERA
 	 ---help---
 	    Enables support for the MSM FD face detection engine.
+
+config L9100_COMMON
+	    bool "LongCheer L9100 support"

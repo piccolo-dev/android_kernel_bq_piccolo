@@ -25,6 +25,10 @@ DEFINE_MSM_MUTEX(msm_eeprom_mutex);
 #ifdef CONFIG_COMPAT
 static struct v4l2_file_operations msm_eeprom_v4l2_subdev_fops;
 #endif
+
+uint8_t g_imx214_otp_module_id = 0;
+uint8_t g_s5k5e2_otp_module_id = 0;
+
 /**
   * msm_eeprom_verify_sum - verify crc32 checksum
   * @mem:	data buffer
@@ -936,11 +940,11 @@ static int eeprom_config_read_cal_data32(struct msm_eeprom_ctrl_t *e_ctrl,
 		cdata.cfg.read_data.num_bytes);
 
 	/* should only be called once.  free kernel resource */
-	if (!rc) {
-		kfree(e_ctrl->cal_data.mapdata);
-		kfree(e_ctrl->cal_data.map);
-		memset(&e_ctrl->cal_data, 0, sizeof(e_ctrl->cal_data));
-	}
+//	if (!rc) {
+//		kfree(e_ctrl->cal_data.mapdata);
+//		kfree(e_ctrl->cal_data.map);
+//		memset(&e_ctrl->cal_data, 0, sizeof(e_ctrl->cal_data));
+//	}
 	return rc;
 }
 
@@ -1012,6 +1016,70 @@ static long msm_eeprom_subdev_fops_ioctl32(struct file *file, unsigned int cmd,
 }
 
 #endif
+
+static int imx214_set_otp_module_id(struct msm_eeprom_ctrl_t *e_ctrl)
+{
+
+	int pageIndex = 0;
+	uint8_t mid;
+	uint8_t wb_flag;
+	uint8_t PageCount = 64;
+	uint8_t *buffer = e_ctrl->cal_data.mapdata;
+
+	for (pageIndex =0;pageIndex<3;pageIndex++)
+	{
+		mid = buffer[1+PageCount*pageIndex];
+		CDBG("%s mid=%x\n", __func__,mid);
+		if(mid == 0x7) //imx214 ofilm
+		{
+			wb_flag = buffer[PageCount*pageIndex];
+			CDBG("%s ofilm wb_flag=%x\n", __func__,wb_flag);
+			if(wb_flag == 0x1)
+			{
+				printk("imx214_set_otp_module_id imx214 ofilm module \n");
+				g_imx214_otp_module_id = mid;
+				break;
+			}
+		}
+		else if(mid == 0x1) //imx214 sunny
+		{
+			wb_flag = buffer[PageCount*pageIndex];
+			CDBG("%s sunny wb_flag=%x\n", __func__,wb_flag);
+			if(wb_flag==0x01)
+			{
+				printk("imx214_set_otp_module_id imx214 sunny module \n");
+				g_imx214_otp_module_id = mid;
+				break;
+			}
+		}
+		else
+		{
+			printk("imx214_set_otp_module_id unknown imx214 module \n");
+		}
+	}
+	return pageIndex;
+
+}
+
+static int s5k5e2_set_otp_module_id(struct msm_eeprom_ctrl_t *e_ctrl)
+{
+   char i;
+   //for truly module
+   for(i=0;i<3;i++)
+      if((e_ctrl->cal_data.mapdata[i*64+62]) == 0)
+         g_s5k5e2_otp_module_id = (uint8_t)(e_ctrl->cal_data.mapdata[i*64]);
+   if (g_s5k5e2_otp_module_id == 0x02)
+	   return 0;
+   //for ofilm module
+   for(i=0;i<4;i++)
+	   if((e_ctrl->cal_data.mapdata[i*32+31]) == 0x01)
+		   g_s5k5e2_otp_module_id = (uint8_t)(e_ctrl->cal_data.mapdata[i*32]);
+   if (g_s5k5e2_otp_module_id == 0x07)
+	   return 0;
+   CDBG("%s s5k5e2_set_otp_module_id=%x\n", __func__,g_s5k5e2_otp_module_id);
+
+   return 0;
+}
 
 static int msm_eeprom_platform_probe(struct platform_device *pdev)
 {
@@ -1143,6 +1211,24 @@ static int msm_eeprom_platform_probe(struct platform_device *pdev)
 	for (j = 0; j < e_ctrl->cal_data.num_data; j++)
 		CDBG("memory_data[%d] = 0x%X\n", j,
 			e_ctrl->cal_data.mapdata[j]);
+	if( (eb_info->eeprom_name != NULL) 
+		&& (   (strcmp(eb_info->eeprom_name, "imx214_olqba15") == 0)
+			|| (strcmp(eb_info->eeprom_name, "imx214_f13n05e") == 0)
+		) )
+	{
+		CDBG("imx214 name = %s\n",eb_info->eeprom_name);
+		imx214_set_otp_module_id(e_ctrl);
+	}
+	else if( (eb_info->eeprom_name != NULL) 
+			&& (   (strcmp(eb_info->eeprom_name,"s5k5e2_olq5f20") == 0)
+				|| (strcmp(eb_info->eeprom_name,"s5k5e2_cma189") == 0) ) )
+	{
+		s5k5e2_set_otp_module_id(e_ctrl);
+	}
+	else
+	{
+		CDBG("there is no need special process\n");
+	}
 
 	e_ctrl->is_supported |= msm_eeprom_match_crc(&e_ctrl->cal_data);
 
