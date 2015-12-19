@@ -4644,7 +4644,7 @@ static int msm8x16_wcd_spmi_resume(struct spmi_device *spmi)
 
 	wcd_resource = spmi_get_resource(spmi, NULL, IORESOURCE_MEM, 0);
 	if (!wcd_resource) {
-		dev_err(&spmi->dev, "Unable to get CDC SPMI resource\n");
+		printk("%s, Unable to get CDC SPMI resource\n", __func__);
 		return -ENXIO;
 	}
 
@@ -4660,7 +4660,7 @@ static int msm8x16_wcd_spmi_suspend(struct spmi_device *spmi,
 
 	wcd_resource = spmi_get_resource(spmi, NULL, IORESOURCE_MEM, 0);
 	if (!wcd_resource) {
-		dev_err(&spmi->dev, "Unable to get CDC SPMI resource\n");
+		printk("%s, Unable to get CDC SPMI resource\n", __func__);
 		return -ENXIO;
 	}
 
