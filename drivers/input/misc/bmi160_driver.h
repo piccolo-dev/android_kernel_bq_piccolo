@@ -6,10 +6,10 @@
  * Public License (GPL).Version 2,June 1991,
  * available at http://www.fsf.org/copyleft/gpl.html
  *
- * @filename $filename$
+ * @filename bmi160_driver.h
  * @date     2014/11/25 14:40
- * @id       $id$
- * @version  1.0
+ * @id       "b3ccb9e"
+ * @version  1.2
  *
  * @brief
  * The head file of BMI160 device driver core code
@@ -297,7 +297,7 @@ struct bmi_client_data {
 	s8 place;
 	u8 selftest;
 
-	u8 wkqueue_en; /*TO DO acc gyro mag*/
+	atomic_t wkqueue_en; /*TO DO acc gyro mag*/
 	atomic_t delay;
 	atomic_t selftest_result;
 

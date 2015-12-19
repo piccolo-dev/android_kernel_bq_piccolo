@@ -6,10 +6,10 @@
  * Public License (GPL).Version 2,June 1991,
  * available at http://www.fsf.org/copyleft/gpl.html
 *
-* @filename $filename$
-* @date: 2014/08/28
-* @id       $id$
-* @version: 2.0
+* @filename bmi160.c
+* @Date: 2014/08/28
+* @id       "b3ccb9e"
+* @Revision: 2.0 $
 *
 * Usage: Sensor API for BMI160 sensor
 */
