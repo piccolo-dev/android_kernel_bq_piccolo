@@ -7,9 +7,9 @@
  * available at http://www.fsf.org/copyleft/gpl.html
  *
  * @filename bmi160_driver.c
- * @date     2014/10/29 12:40
- * @id       "c29f102"
- * @version  1.0
+ * @date     2014/11/25 14:40
+ * @id       "b3ccb9e"
+ * @version  1.2
  *
  * @brief
  * The core code of BMI160 device driver
@@ -19,7 +19,7 @@
  * which includes hardware related functions, input device register,
  * device attribute files, etc.
 */
-
+#define pr_fmt(fmt)      "%s: " fmt, __func__
 #include "bmi160.h"
 #include "bmi160_driver.h"
 #include <linux/device.h>
@@ -28,13 +28,11 @@
 #include <linux/of_irq.h>
 
 
-static unsigned char fifo_data[2048];/*1024 + 12*4*/
-#define I2C_BURST_READ_MAX_LEN      256
-uint64_t g_current_apts_us = 0;
-#define BMI160_STORE_COUNT  6000
-
-#define LMADA 998/1000
-
+#define I2C_BURST_READ_MAX_LEN      (256)
+#define BMI160_STORE_COUNT  (6000)
+#define LMADA     (1)
+uint64_t g_current_apts_us;
+static unsigned char g_fifo_data_arr[2048];/*1024 + 12*4*/
 
 enum BMI_SENSOR_INT_T {
 	/* Interrupt enable0*/
@@ -302,26 +300,33 @@ static const struct bmi_sensor_time_odr_tbl
 
 static void bmi_dump_reg(struct bmi_client_data *client_data)
 {
-	#define REG_MAX 0x7f
+	#define REG_MAX0 0x24
+	#define REG_MAX1 0x56
 	int i;
-	u8 dbg_buf[REG_MAX];
-	u8 dbg_buf_str[REG_MAX * 3 + 1] = "";
+	u8 dbg_buf0[REG_MAX0];
+	u8 dbg_buf1[REG_MAX1];
+	u8 dbg_buf_str0[REG_MAX0 * 3 + 1] = "";
+	u8 dbg_buf_str1[REG_MAX1 * 3 + 1] = "";
 
-	for (i = 0; i < BYTES_PER_LINE; i++) {
-		dbg_buf[i] = i;
-		sprintf(dbg_buf_str + i * 3, "%02x%c",
-				dbg_buf[i],
-				(((i + 1) % BYTES_PER_LINE == 0) ? '\n' : ' '));
-	}
-	dev_notice(client_data->dev, "%s\n", dbg_buf_str);
+	dev_notice(client_data->dev, "0x00:\n");
 
 	client_data->device.bus_read(client_data->device.dev_addr,
-			BMI_REG_NAME(USER_CHIP_ID), dbg_buf, REG_MAX);
-	for (i = 0; i < REG_MAX; i++) {
-		sprintf(dbg_buf_str + i * 3, "%02x%c", dbg_buf[i],
+			BMI_REG_NAME(USER_CHIP_ID), dbg_buf0, REG_MAX0);
+	for (i = 0; i < REG_MAX0; i++) {
+		sprintf(dbg_buf_str0 + i * 3, "%02x%c", dbg_buf0[i],
+				(((i + 1) % BYTES_PER_LINE == 0) ? '\n' : ' '));
+
+	dev_notice(client_data->dev, "%s\n", dbg_buf_str0);
+
+	client_data->device.bus_read(client_data->device.dev_addr,
+			BMI160_USER_ACC_CONF_ADDR, dbg_buf1, REG_MAX1);
+	dev_notice(client_data->dev, "\n0x40:\n");
+	for (i = 0; i < REG_MAX1; i++) {
+		sprintf(dbg_buf_str1 + i * 3, "%02x%c", dbg_buf1[i],
 				(((i + 1) % BYTES_PER_LINE == 0) ? '\n' : ' '));
 	}
-	dev_notice(client_data->dev, "%s\n", dbg_buf_str);
+	dev_notice(client_data->dev, "%s\n", dbg_buf_str1);
+	}
 }
 
 /*!
@@ -386,7 +391,6 @@ static void bmi_remap_sensor_data(struct bmi160_axis_data_t *val,
 
 }
 
-#if 1
 static void bmi_remap_data_acc(struct bmi_client_data *client_data,
 				struct bmi160acc_t *acc_frame)
 {
@@ -435,7 +439,38 @@ static void bmi_remap_data_gyro(struct bmi_client_data *client_data,
 
 }
 
-#endif
+static void bmi_fifo_frame_bytes_extend_calc(
+	struct bmi_client_data *client_data,
+	unsigned int *fifo_frmbytes_extend)
+{
+
+	switch (client_data->fifo_data_sel) {
+	case BMI_FIFO_A_SEL:
+	case BMI_FIFO_G_SEL:
+		*fifo_frmbytes_extend = 7;
+		break;
+	case BMI_FIFO_G_A_SEL:
+		*fifo_frmbytes_extend = 13;
+		break;
+	case BMI_FIFO_M_SEL:
+		*fifo_frmbytes_extend = 9;
+		break;
+	case BMI_FIFO_M_A_SEL:
+	case BMI_FIFO_M_G_SEL:
+		/*8(mag) + 6(gyro or acc) +1(head) = 15*/
+		*fifo_frmbytes_extend = 15;
+		break;
+	case BMI_FIFO_M_G_A_SEL:
+		/*8(mag) + 6(gyro or acc) + 6 + 1 = 21*/
+		*fifo_frmbytes_extend = 21;
+		break;
+	default:
+		*fifo_frmbytes_extend = 0;
+		break;
+
+	};
+
+}
 
 static int bmi_input_init(struct bmi_client_data *client_data)
 {
@@ -450,10 +485,6 @@ static int bmi_input_init(struct bmi_client_data *client_data)
 	dev->id.bustype = BUS_I2C;
 
 	input_set_capability(dev, EV_ABS, ABS_MISC);
-	//input_set_capability(dev, EV_REL, INPUT_EVENT_STEP_DETECTOR);
-	//input_set_abs_params(dev, ABS_X, BMI_VALUE_MIN, BMI_VALUE_MAX, 0, 0);
-	//input_set_abs_params(dev, ABS_Y, BMI_VALUE_MIN, BMI_VALUE_MAX, 0, 0);
-	//input_set_abs_params(dev, ABS_Z, BMI_VALUE_MIN, BMI_VALUE_MAX, 0, 0);
 	input_set_capability(dev, EV_MSC, INPUT_EVENT_SGM);
 	input_set_capability(dev, EV_MSC, INPUT_EVENT_STEP_DETECTOR);
 	input_set_drvdata(dev, client_data);
@@ -465,7 +496,9 @@ static int bmi_input_init(struct bmi_client_data *client_data)
 		return err;
 	}
 	client_data->input = dev;
-	dev_notice(client_data->dev, "bmi160 input register successfully, %s!\n", client_data->input->name);
+	dev_notice(client_data->dev,
+		"bmi160 input register successfully, %s!\n",
+		client_data->input->name);
 	return err;
 }
 
@@ -527,7 +560,7 @@ static int bmi_pmu_set_suspend(struct bmi_client_data *client_data)
 {
 	int err = 0;
 	if (client_data == NULL)
-		return -1;
+		return -EINVAL;
 	else {
 		err += BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_acc_arr[SENSOR_PM_SUSPEND]);
@@ -562,7 +595,8 @@ static void bmi_work_func(struct work_struct *work)
 		msecs_to_jiffies(atomic_read(&client_data->delay));
 
 	/* TODO */
-	//input_sync(client_data->input);
+	/*report current frame via input event*/
+	/*input_sync(client_data->input);*/
 
 	schedule_delayed_work(&client_data->work, delay);
 }
@@ -601,7 +635,7 @@ static ssize_t bmi160_sensor_time_show(struct device *dev,
 	if (err)
 		return err;
 	else
-		return sprintf(buf, "0x%x\n", sensor_time);
+		return sprintf(buf, "0x%x\n", (unsigned int)sensor_time);
 }
 
 static ssize_t bmi160_fifo_full_stop_show(struct device *dev,
@@ -686,20 +720,18 @@ int bmi160_fifo_data_sel_get(struct bmi_client_data *client_data)
 	int err = 0;
 	unsigned char fifo_acc_en, fifo_gyro_en, fifo_mag_en;
 	unsigned char fifo_datasel;
-	
+
 	err += BMI_CALL_API(get_fifo_acc_en)(&fifo_acc_en);
 	err += BMI_CALL_API(get_fifo_gyro_en)(&fifo_gyro_en);
-    #ifdef BMI160_MAG_INTERFACE_SUPPORT
 	err += BMI_CALL_API(get_fifo_mag_en)(&fifo_mag_en);
-    #endif
-	
+
 	if (err)
 		return err;
-	
+
 	fifo_datasel = (fifo_acc_en << BMI_ACC_SENSOR) |
 			(fifo_gyro_en << BMI_GYRO_SENSOR) |
 				(fifo_mag_en << BMI_MAG_SENSOR);
-	
+
 	client_data->fifo_data_sel = fifo_datasel;
 
 	return err;
@@ -715,7 +747,7 @@ static ssize_t bmi160_fifo_data_sel_show(struct device *dev,
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	err = bmi160_fifo_data_sel_get(client_data);
 	if (err)
-		return -1;
+		return -EINVAL;
 	return sprintf(buf, "%d\n", client_data->fifo_data_sel);
 }
 
@@ -737,20 +769,18 @@ static ssize_t bmi160_fifo_data_sel_store(struct device *dev,
 	if (data > 7)
 		return -EINVAL;
 
-	
+
 	fifo_datasel = (unsigned char)data;
+
 
 	err += BMI_CALL_API(set_fifo_acc_en)
 			((fifo_datasel & (1 << BMI_ACC_SENSOR)) ? 1 :  0);
 	err += BMI_CALL_API(set_fifo_gyro_en)
 			(fifo_datasel & (1 << BMI_GYRO_SENSOR) ? 1 : 0);
-    #ifdef BMI160_MAG_INTERFACE_SUPPORT
 	err += BMI_CALL_API(set_fifo_mag_en)
 			((fifo_datasel & (1 << BMI_MAG_SENSOR)) ? 1 : 0);
-    #endif
-	
-	//err += BMI_CALL_API(set_command_register)(CMD_CLR_FIFO_DATA);
 
+	/*err += BMI_CALL_API(set_command_register)(CMD_CLR_FIFO_DATA);*/
 	if (err)
 		return -EIO;
 	else {
@@ -770,21 +800,22 @@ static int bmi_fifo_analysis_handle(struct bmi_client_data *client_data,
 	u8 frame_head = 0;/* every frame head*/
 	int len = 0;
 
-	u8 skip_frame_cnt = 0;
+	/*u8 skip_frame_cnt = 0;*/
 	u8 acc_frm_cnt = 0;/*0~146*/
 	u8 gyro_frm_cnt = 0;
 	u8 mag_frm_cnt = 0;
 	u8 tmp_frm_cnt = 0;
-	u8 tmp_odr = 0;
-	uint64_t current_apts_us = 0;
+	/*u8 tmp_odr = 0;*/
+	/*uint64_t current_apts_us = 0;*/
 	/*fifo data last frame start_index A G M*/
 	u64 fifo_time = 0;
-	static u32 current_frm_ts = 0;
+	static u32 current_frm_ts;
 	u16 fifo_index = 0;/* fifo data buff index*/
 	u16 fifo_index_tmp = 0;
 	u16 i = 0;
 	s8 last_return_st = 0;
 	int err = 0;
+	unsigned int frame_bytes = 0;
 	struct bmi160mag_t mag;
 	struct bmi160_mag_xyz mag_comp_xyz;
 	struct bmi160acc_t acc_frame_arr[FIFO_FRAME_CNT];
@@ -792,22 +823,21 @@ static int bmi_fifo_analysis_handle(struct bmi_client_data *client_data,
 	struct bmi160mag_t mag_frame_arr[FIFO_FRAME_CNT];
 
 	struct odr_t odr;
-//	u32 sensor_time;
+
 	memset(&odr, 0, sizeof(odr));
 	memset(&mag, 0, sizeof(mag));
 	memset(&mag_comp_xyz, 0, sizeof(mag_comp_xyz));
-	for (i = 0; i < FIFO_FRAME_CNT; i++)
-	{
+	for (i = 0; i < FIFO_FRAME_CNT; i++) {
 		memset(&mag_frame_arr[i], 0, sizeof(struct bmi160mag_t));
 		memset(&acc_frame_arr[i], 0, sizeof(struct bmi160acc_t));
 		memset(&gyro_frame_arr[i], 0, sizeof(struct bmi160gyro_t));
 	}
-	current_apts_us = get_current_timestamp();
+	/*current_apts_us = get_current_timestamp();*/
 	/* no fifo select for bmi sensor*/
 	if (!client_data->fifo_data_sel) {
 		dev_err(client_data->dev,
 				"No select any sensor FIFO for BMI16x\n");
-		return -1;
+		return -EINVAL;
 	}
 	/*driver need read acc_odr/gyro_odr/mag_odr*/
 	if ((client_data->fifo_data_sel) & (1 << BMI_ACC_SENSOR))
@@ -816,370 +846,363 @@ static int bmi_fifo_analysis_handle(struct bmi_client_data *client_data,
 		odr.gyro_odr = client_data->odr.gyro_odr;
 	if ((client_data->fifo_data_sel) & (1 << BMI_MAG_SENSOR))
 		odr.mag_odr = client_data->odr.mag_odr;
-
-	
-	/* search sensor time sub function firstly */
+	bmi_fifo_frame_bytes_extend_calc(client_data, &frame_bytes);
+/* search sensor time sub function firstly */
 	for (fifo_index = 0; fifo_index < fifo_length;) {
-			/* conside limited HW i2c burst reading issue, need to re-calc index 
-			* 256 512 768 1024...*/
+		/* conside limited HW i2c burst reading issue,
+		need to re-calc index 256 512 768 1024...*/
 		if ((fifo_index_tmp >> 8) != (fifo_index >> 8)) {
-			if (fifo_data[fifo_index_tmp] == fifo_data[(fifo_index >> 8)<<8])
-			{
+			if (fifo_data[fifo_index_tmp] ==
+				fifo_data[(fifo_index >> 8)<<8]) {
 				fifo_index = (fifo_index >> 8) << 8;
-				fifo_length += (fifo_index - fifo_index_tmp + 1);
+				fifo_length +=
+					(fifo_index - fifo_index_tmp + 1);
 			}
 		}
 		fifo_index_tmp = fifo_index;
+		/* compare index with 256/512/ before doing parsing*/
+		if (((fifo_index + frame_bytes) >> 8) != (fifo_index >> 8)) {
+			fifo_index = ((fifo_index + frame_bytes) >> 8) << 8;
+			continue;
+		}
+
 		frame_head = fifo_data[fifo_index];
-				
-			switch (frame_head) {
-				/*skip frame 0x40 22 0x84*/
-				case FIFO_HEAD_SKIP_FRAME:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 1 > fifo_length) {
-						last_return_st = FIFO_SKIP_OVER_LEN;
-						break;
-					}
-					skip_frame_cnt = fifo_data[fifo_index];
-					fifo_index = fifo_index + 1;
-					break;
-				}
-				
-				/*M & G & A*/
-				case FIFO_HEAD_M_G_A:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 20 > fifo_length) {
-						last_return_st = FIFO_M_G_A_OVER_LEN;
-						break;
-					}
-					
-					/* mag frm index = gyro */
-					mag_frm_cnt = gyro_frm_cnt;
-					mag_frame_arr[mag_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					mag_frame_arr[mag_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					mag_frame_arr[mag_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
-					mag_frame_arr[mag_frm_cnt].r =
-						fifo_data[fifo_index + 7] << 8 |
-							fifo_data[fifo_index + 6];
-		
-					gyro_frame_arr[gyro_frm_cnt].x =
-						fifo_data[fifo_index + 9] << 8 |
-							fifo_data[fifo_index + 8];
-					gyro_frame_arr[gyro_frm_cnt].y =
-						fifo_data[fifo_index + 11] << 8 |
-							fifo_data[fifo_index + 10];
-					gyro_frame_arr[gyro_frm_cnt].z =
-						fifo_data[fifo_index + 13] << 8 |
-							fifo_data[fifo_index + 12];
-		
-					acc_frame_arr[acc_frm_cnt].x =
-						fifo_data[fifo_index + 15] << 8 |
-							fifo_data[fifo_index + 14];
-					acc_frame_arr[acc_frm_cnt].y =
-						fifo_data[fifo_index + 17] << 8 |
-							fifo_data[fifo_index + 16];
-					acc_frame_arr[acc_frm_cnt].z =
-						fifo_data[fifo_index + 19] << 8 |
-							fifo_data[fifo_index + 18];
 
-					mag_frm_cnt++;/* M fram_cnt++ */
-					gyro_frm_cnt++;/* G fram_cnt++ */
-					acc_frm_cnt++;/* A fram_cnt++ */
-					
-					fifo_index = fifo_index + 20;
-					break;
-				}
-				
-				case FIFO_HEAD_M_A:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 14 > fifo_length) {
-						last_return_st = FIFO_M_A_OVER_LEN;
-						break;
-					}
-					
-					mag_frm_cnt = acc_frm_cnt;
-					
-					mag_frame_arr[mag_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					mag_frame_arr[mag_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					mag_frame_arr[mag_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
-					mag_frame_arr[mag_frm_cnt].r =
-						fifo_data[fifo_index + 7] << 8 |
-							fifo_data[fifo_index + 6];
-					
-					acc_frame_arr[acc_frm_cnt].x =
-						fifo_data[fifo_index + 9] << 8 |
-							fifo_data[fifo_index + 8];
-					acc_frame_arr[acc_frm_cnt].y =
-						fifo_data[fifo_index + 11] << 8 |
-							fifo_data[fifo_index + 10];
-					acc_frame_arr[acc_frm_cnt].z =
-						fifo_data[fifo_index + 13] << 8 |
-							fifo_data[fifo_index + 12];
+		switch (frame_head) {
+			/*skip frame 0x40 22 0x84*/
+		case FIFO_HEAD_SKIP_FRAME:
+		/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + 1 > fifo_length) {
+				last_return_st = FIFO_SKIP_OVER_LEN;
+				break;
+			}
+			/*skip_frame_cnt = fifo_data[fifo_index];*/
+			fifo_index = fifo_index + 1;
+		break;
 
-					mag_frm_cnt++;/* M fram_cnt++ */
-					acc_frm_cnt++;/* A fram_cnt++ */
-					
-					fifo_index = fifo_index + 14;
-					break;
-				}
+			/*M & G & A*/
+		case FIFO_HEAD_M_G_A:
+		{/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + MGA_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_M_G_A_OVER_LEN;
+				break;
+			}
 
-				case FIFO_HEAD_M_G:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 14 > fifo_length) {
-							last_return_st = FIFO_M_G_OVER_LEN;
-							break;
-					}
+			/* mag frm index = gyro */
+			mag_frm_cnt = gyro_frm_cnt;
+			mag_frame_arr[mag_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			mag_frame_arr[mag_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			mag_frame_arr[mag_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+			mag_frame_arr[mag_frm_cnt].r =
+				fifo_data[fifo_index + 7] << 8 |
+					fifo_data[fifo_index + 6];
 
-					mag_frm_cnt = gyro_frm_cnt;
-					mag_frame_arr[mag_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					mag_frame_arr[mag_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					mag_frame_arr[mag_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
-					mag_frame_arr[mag_frm_cnt].r =
-						fifo_data[fifo_index + 7] << 8 |
-							fifo_data[fifo_index + 6];
-		
-					gyro_frame_arr[gyro_frm_cnt].x =
-						fifo_data[fifo_index + 9] << 8 |
-							fifo_data[fifo_index + 8];
-					gyro_frame_arr[gyro_frm_cnt].y =
-						fifo_data[fifo_index + 11] << 8 |
-							fifo_data[fifo_index + 10];
-					gyro_frame_arr[gyro_frm_cnt].z =
-						fifo_data[fifo_index + 13] << 8 |
-							fifo_data[fifo_index + 12];
-					
-					mag_frm_cnt++;/* M fram_cnt++ */
-					gyro_frm_cnt++;/* G fram_cnt++ */
-					fifo_index = fifo_index + 14;
-					break;
-				}
+			gyro_frame_arr[gyro_frm_cnt].x =
+				fifo_data[fifo_index + 9] << 8 |
+					fifo_data[fifo_index + 8];
+			gyro_frame_arr[gyro_frm_cnt].y =
+				fifo_data[fifo_index + 11] << 8 |
+					fifo_data[fifo_index + 10];
+			gyro_frame_arr[gyro_frm_cnt].z =
+				fifo_data[fifo_index + 13] << 8 |
+					fifo_data[fifo_index + 12];
 
-				case FIFO_HEAD_G_A:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 12 > fifo_length) {
-						last_return_st = FIFO_G_A_OVER_LEN;
-						break;
-					}
-					gyro_frame_arr[gyro_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					gyro_frame_arr[gyro_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					gyro_frame_arr[gyro_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
+			acc_frame_arr[acc_frm_cnt].x =
+				fifo_data[fifo_index + 15] << 8 |
+					fifo_data[fifo_index + 14];
+			acc_frame_arr[acc_frm_cnt].y =
+				fifo_data[fifo_index + 17] << 8 |
+					fifo_data[fifo_index + 16];
+			acc_frame_arr[acc_frm_cnt].z =
+				fifo_data[fifo_index + 19] << 8 |
+					fifo_data[fifo_index + 18];
 
-					acc_frame_arr[acc_frm_cnt].x =
-						fifo_data[fifo_index + 7] << 8 |
-							fifo_data[fifo_index + 6];
-					acc_frame_arr[acc_frm_cnt].y =
-						fifo_data[fifo_index + 9] << 8 |
-							fifo_data[fifo_index + 8];
-					acc_frame_arr[acc_frm_cnt].z =
-						fifo_data[fifo_index + 11] << 8 |
-							fifo_data[fifo_index + 10];
-							fifo_index = fifo_index + 12;
+			mag_frm_cnt++;/* M fram_cnt++ */
+			gyro_frm_cnt++;/* G fram_cnt++ */
+			acc_frm_cnt++;/* A fram_cnt++ */
 
-					bmi_remap_data_gyro(client_data,
-						&gyro_frame_arr[gyro_frm_cnt]);
-					bmi_remap_data_acc(client_data,
-						&acc_frame_arr[acc_frm_cnt]);
+			fifo_index = fifo_index + MGA_BYTES_FRM;
+			break;
+		}
 
-					gyro_frm_cnt++;
-					acc_frm_cnt++;
-			
-					break;
-				}
-				case FIFO_HEAD_A:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 6 > fifo_length) {
-						last_return_st = FIFO_A_OVER_LEN;
-						break;
-					}
-					
-					acc_frame_arr[acc_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					acc_frame_arr[acc_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					acc_frame_arr[acc_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
+		case FIFO_HEAD_M_A:
+		{/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + MA_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_M_A_OVER_LEN;
+				break;
+			}
 
-					bmi_remap_data_acc(client_data,
-						&acc_frame_arr[acc_frm_cnt]);
-					
-					acc_frm_cnt++;/*acc_frm_cnt*/
-					
-					fifo_index = fifo_index + 6;
-					break;
-				}
-				case FIFO_HEAD_G:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 6 > fifo_length) {
-						last_return_st = FIFO_G_OVER_LEN;
-						break;
-					}
+			mag_frm_cnt = acc_frm_cnt;
 
-					gyro_frame_arr[gyro_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					gyro_frame_arr[gyro_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					gyro_frame_arr[gyro_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
+			mag_frame_arr[mag_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			mag_frame_arr[mag_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			mag_frame_arr[mag_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+			mag_frame_arr[mag_frm_cnt].r =
+				fifo_data[fifo_index + 7] << 8 |
+					fifo_data[fifo_index + 6];
 
-					bmi_remap_data_gyro(client_data,
-						&gyro_frame_arr[gyro_frm_cnt]);
-			
-					gyro_frm_cnt++;/*gyro_frm_cnt*/
-					
-					fifo_index = fifo_index + 6;
-					break;
-				}
-				case FIFO_HEAD_M:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-					if (fifo_index + 8 > fifo_length) {
-						last_return_st = FIFO_M_OVER_LEN;
-						break;
-					}
+			acc_frame_arr[acc_frm_cnt].x =
+				fifo_data[fifo_index + 9] << 8 |
+					fifo_data[fifo_index + 8];
+			acc_frame_arr[acc_frm_cnt].y =
+				fifo_data[fifo_index + 11] << 8 |
+					fifo_data[fifo_index + 10];
+			acc_frame_arr[acc_frm_cnt].z =
+				fifo_data[fifo_index + 13] << 8 |
+					fifo_data[fifo_index + 12];
 
-					mag_frame_arr[mag_frm_cnt].x =
-						fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					mag_frame_arr[mag_frm_cnt].y =
-						fifo_data[fifo_index + 3] << 8 |
-							fifo_data[fifo_index + 2];
-					mag_frame_arr[mag_frm_cnt].z =
-						fifo_data[fifo_index + 5] << 8 |
-							fifo_data[fifo_index + 4];
-					mag_frame_arr[mag_frm_cnt].r =
-						fifo_data[fifo_index + 7] << 8 |
-							fifo_data[fifo_index + 6];
+			mag_frm_cnt++;/* M fram_cnt++ */
+			acc_frm_cnt++;/* A fram_cnt++ */
 
-					mag_frm_cnt++;/* M fram_cnt++ */
-					
-					fifo_index = fifo_index + 8;
-					break;
-				}
-					
-				/* sensor time frame*/
-				case FIFO_HEAD_SENSOR_TIME:
-				{	/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
-		
-					if (fifo_index + 3 > fifo_length) {
-						last_return_st = FIFO_SENSORTIME_RETURN;
-						break;
-					}
-					fifo_time = fifo_data[fifo_index + 2] << 16 |
-							fifo_data[fifo_index + 1] << 8 |
-							fifo_data[fifo_index + 0];
-					
-					client_data->fifo_time = fifo_time;
-					/*fifo sensor time frame index + 3*/
-					fifo_index = fifo_index + 3;
-					break;
-				}
-				case FIFO_HEAD_OVER_READ_LSB:
-				{
-					/*fifo data frame index + 1*/
-					fifo_index = fifo_index + 1;
+			fifo_index = fifo_index + MA_BYTES_FRM;
+			break;
+		}
 
-					if (fifo_index + 1 > fifo_length) {
-						last_return_st = FIFO_OVER_READ_RETURN;
-						break;
-					}
-					if (fifo_data[fifo_index] ==
-							FIFO_HEAD_OVER_READ_MSB) {
-						/*fifo over read frame index + 1*/
-						fifo_index = fifo_index + 1;
-						break;
-					} else {
-						last_return_st = FIFO_OVER_READ_RETURN;
-						break;
-					}
-				}
-				default:
-					last_return_st = 1;
-					break;
-			
+		case FIFO_HEAD_M_G:
+		{/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + MG_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_M_G_OVER_LEN;
+				break;
+			}
+
+			mag_frm_cnt = gyro_frm_cnt;
+			mag_frame_arr[mag_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			mag_frame_arr[mag_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			mag_frame_arr[mag_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+			mag_frame_arr[mag_frm_cnt].r =
+				fifo_data[fifo_index + 7] << 8 |
+					fifo_data[fifo_index + 6];
+
+			gyro_frame_arr[gyro_frm_cnt].x =
+				fifo_data[fifo_index + 9] << 8 |
+					fifo_data[fifo_index + 8];
+			gyro_frame_arr[gyro_frm_cnt].y =
+				fifo_data[fifo_index + 11] << 8 |
+					fifo_data[fifo_index + 10];
+			gyro_frame_arr[gyro_frm_cnt].z =
+				fifo_data[fifo_index + 13] << 8 |
+					fifo_data[fifo_index + 12];
+
+			mag_frm_cnt++;/* M fram_cnt++ */
+			gyro_frm_cnt++;/* G fram_cnt++ */
+			fifo_index = fifo_index + MG_BYTES_FRM;
+		break;
+		}
+
+		case FIFO_HEAD_G_A:
+		{	/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + GA_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_G_A_OVER_LEN;
+				break;
+			}
+			gyro_frame_arr[gyro_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			gyro_frame_arr[gyro_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			gyro_frame_arr[gyro_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+
+			acc_frame_arr[acc_frm_cnt].x =
+				fifo_data[fifo_index + 7] << 8 |
+					fifo_data[fifo_index + 6];
+			acc_frame_arr[acc_frm_cnt].y =
+				fifo_data[fifo_index + 9] << 8 |
+					fifo_data[fifo_index + 8];
+			acc_frame_arr[acc_frm_cnt].z =
+				fifo_data[fifo_index + 11] << 8 |
+					fifo_data[fifo_index + 10];
+
+			bmi_remap_data_gyro(client_data,
+				&gyro_frame_arr[gyro_frm_cnt]);
+			bmi_remap_data_acc(client_data,
+				&acc_frame_arr[acc_frm_cnt]);
+
+			gyro_frm_cnt++;
+			acc_frm_cnt++;
+			fifo_index = fifo_index + GA_BYTES_FRM;
+
+			break;
+		}
+		case FIFO_HEAD_A:
+		{	/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + A_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_A_OVER_LEN;
+				break;
+			}
+
+			acc_frame_arr[acc_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			acc_frame_arr[acc_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			acc_frame_arr[acc_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+
+			bmi_remap_data_acc(client_data,
+				&acc_frame_arr[acc_frm_cnt]);
+
+			acc_frm_cnt++;/*acc_frm_cnt*/
+			fifo_index = fifo_index + A_BYTES_FRM;
+			break;
+		}
+		case FIFO_HEAD_G:
+		{	/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + G_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_G_OVER_LEN;
+				break;
+			}
+
+			gyro_frame_arr[gyro_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			gyro_frame_arr[gyro_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			gyro_frame_arr[gyro_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+
+			bmi_remap_data_gyro(client_data,
+				&gyro_frame_arr[gyro_frm_cnt]);
+
+			gyro_frm_cnt++;/*gyro_frm_cnt*/
+
+			fifo_index = fifo_index + G_BYTES_FRM;
+			break;
+		}
+		case FIFO_HEAD_M:
+		{	/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+			if (fifo_index + A_BYTES_FRM > fifo_length) {
+				last_return_st = FIFO_M_OVER_LEN;
+				break;
+			}
+
+			mag_frame_arr[mag_frm_cnt].x =
+				fifo_data[fifo_index + 1] << 8 |
+					fifo_data[fifo_index + 0];
+			mag_frame_arr[mag_frm_cnt].y =
+				fifo_data[fifo_index + 3] << 8 |
+					fifo_data[fifo_index + 2];
+			mag_frame_arr[mag_frm_cnt].z =
+				fifo_data[fifo_index + 5] << 8 |
+					fifo_data[fifo_index + 4];
+			mag_frame_arr[mag_frm_cnt].r =
+				fifo_data[fifo_index + 7] << 8 |
+					fifo_data[fifo_index + 6];
+
+			mag_frm_cnt++;/* M fram_cnt++ */
+
+			fifo_index = fifo_index + A_BYTES_FRM;
+			break;
+		}
+
+		/* sensor time frame*/
+		case FIFO_HEAD_SENSOR_TIME:
+		{
+			/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+
+			if (fifo_index + 3 > fifo_length) {
+				last_return_st = FIFO_SENSORTIME_RETURN;
+				break;
+			}
+			fifo_time =
+				fifo_data[fifo_index + 2] << 16 |
+				fifo_data[fifo_index + 1] << 8 |
+				fifo_data[fifo_index + 0];
+
+			client_data->fifo_time = fifo_time;
+			/*fifo sensor time frame index + 3*/
+			fifo_index = fifo_index + 3;
+			break;
+		}
+		case FIFO_HEAD_OVER_READ_LSB:
+			/*fifo data frame index + 1*/
+			fifo_index = fifo_index + 1;
+
+			if (fifo_index + 1 > fifo_length) {
+				last_return_st = FIFO_OVER_READ_RETURN;
+				break;
+			}
+			if (fifo_data[fifo_index] ==
+					FIFO_HEAD_OVER_READ_MSB) {
+				/*fifo over read frame index + 1*/
+				fifo_index = fifo_index + 1;
+				break;
+			} else {
+				last_return_st = FIFO_OVER_READ_RETURN;
+				break;
+			}
+
+		default:
+			last_return_st = 1;
+			break;
+
 			}
 			if (last_return_st)
 				break;
-
-	}	
+		}
 	fifo_time = 0;
-	/*Acc Only*/
-	if (client_data->fifo_data_sel == BMI_FIFO_A_SEL)
-	{
-		//printk(KERN_INFO "acc_frm_cnt:%d\n", acc_frm_cnt);
-		for (i = 0; i < acc_frm_cnt; i++)
-		{
-			if (fifo_time) {
-					current_frm_ts = current_apts_us - ((fifo_time & (sensortime_duration_tbl[odr.acc_odr].ts_delat)) +
-						(sensortime_duration_tbl[odr.acc_odr].ts_duration_lsb*(acc_frm_cnt - i - 1)))*625/16;
-			} else 
-				/*current_frm_ts += 256;*/
-				current_frm_ts += sensortime_duration_tbl[odr.acc_odr].ts_duration_us*LMADA;
+/*current_frm_ts = current_apts_us -
+((fifo_time & (sensortime_duration_tbl[odr.acc_odr].ts_delat)) +
+(sensortime_duration_tbl[odr.acc_odr].ts_duration_lsb
+*(acc_frm_cnt - i - 1)))*625/16;*/
+/*Acc Only*/
+	if (client_data->fifo_data_sel == BMI_FIFO_A_SEL) {
+		for (i = 0; i < acc_frm_cnt; i++) {
+			/*current_frm_ts += 256;*/
+			current_frm_ts +=
+		sensortime_duration_tbl[odr.acc_odr].ts_duration_us*LMADA;
 
-			len = sprintf(buf, "%s %d %d %d %d\n",
-						ACC_FIFO_HEAD,
-						acc_frame_arr[i].x,
-						acc_frame_arr[i].y,
-						acc_frame_arr[i].z,
-						current_frm_ts);
-
+			len = sprintf(buf, "%s %d %d %d %d ",
+					ACC_FIFO_HEAD,
+					acc_frame_arr[i].x,
+					acc_frame_arr[i].y,
+					acc_frame_arr[i].z,
+					current_frm_ts);
 			buf += len;
 			err += len;
 		}
-
-	
-
 	}
 
 
 	/*only for G*/
-	if (client_data->fifo_data_sel == BMI_FIFO_G_SEL)
-	{
-		for (i = 0; i < gyro_frm_cnt; i++)
-		{
-			if (fifo_time) {
-					current_frm_ts = current_apts_us - ((fifo_time & (sensortime_duration_tbl[odr.gyro_odr].ts_delat)) +
-						(sensortime_duration_tbl[odr.gyro_odr].ts_duration_lsb*(gyro_frm_cnt - i - 1)))*625/16;
-			} else 
-				/*current_frm_ts += 256;*/
-				current_frm_ts += sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA;
+	if (client_data->fifo_data_sel == BMI_FIFO_G_SEL) {
+		for (i = 0; i < gyro_frm_cnt; i++) {
+			/*current_frm_ts += 256;*/
+			current_frm_ts +=
+		sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA;
 
 			len = sprintf(buf, "%s %d %d %d %d ",
 						GYRO_FIFO_HEAD,
@@ -1187,38 +1210,31 @@ static int bmi_fifo_analysis_handle(struct bmi_client_data *client_data,
 						gyro_frame_arr[i].y,
 						gyro_frame_arr[i].z,
 						current_frm_ts
-						);
-
+					);
 			buf += len;
 			err += len;
 		}
-
 	}
 
 	/*only for M*/
-	if (client_data->fifo_data_sel == BMI_FIFO_M_SEL)
-	{
-		for (i = 0; i < mag_frm_cnt; i++)
-		{
-			if (fifo_time) {
-					current_frm_ts = current_apts_us - ((fifo_time & (sensortime_duration_tbl[odr.mag_odr].ts_delat)) +
-						(sensortime_duration_tbl[odr.mag_odr].ts_duration_lsb*(mag_frm_cnt - i - 1)))*625/16;
-			} else 
-				/*current_frm_ts += 256;*/
-				current_frm_ts += sensortime_duration_tbl[odr.mag_odr].ts_duration_us*LMADA;
+	if (client_data->fifo_data_sel == BMI_FIFO_M_SEL) {
+		for (i = 0; i < mag_frm_cnt; i++) {
+			/*current_frm_ts += 256;*/
+			current_frm_ts +=
+		sensortime_duration_tbl[odr.mag_odr].ts_duration_us*LMADA;
 
 			mag.x = mag_frame_arr[i].x >> 3;
 			mag.y = mag_frame_arr[i].y >> 3;
 			mag.z = mag_frame_arr[i].z >> 1;
 			mag.r = mag_frame_arr[i].r >> 2;
-			bmi160_mag_compensate_xyz_raw(&mag_comp_xyz,mag);
+			bmi160_mag_compensate_xyz_raw(&mag_comp_xyz, mag);
 			len = sprintf(buf, "%s %d %d %d %d ",
 						MAG_FIFO_HEAD,
 						mag_comp_xyz.x,
 						mag_comp_xyz.y,
 						mag_comp_xyz.z,
 						current_frm_ts
-						);
+					);
 
 			buf += len;
 			err += len;
@@ -1226,103 +1242,92 @@ static int bmi_fifo_analysis_handle(struct bmi_client_data *client_data,
 
 	}
 	
+
+/*only for A M G*/
+if (client_data->fifo_data_sel == BMI_FIFO_M_G_A_SEL) { 
+	for (i = 0; i < gyro_frm_cnt; i++) { 
+    	/*sensor timeLSB*/ 
+        /*dia(sensor_time) = fifo_time & (0xff), uint:LSB, 39.0625us*/ 
+        /*AP tinmestamp 390625/10000 = 625 /16 */ 
+        current_frm_ts += 
+        sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA; 
+  
+		if (mag_frame_arr[i].x) { 
+        	mag.x = mag_frame_arr[i].x >> 3; 
+            mag.y = mag_frame_arr[i].y >> 3; 
+            mag.z = mag_frame_arr[i].z >> 1; 
+            mag.r = mag_frame_arr[i].r >> 2; 
+            bmi160_mag_compensate_xyz_raw(&mag_comp_xyz, mag); 
+            len = sprintf(buf, 
+           	 "%s %d %d %d %d %s %d %d %d %d %s %d %d %d %d ", 
+            	GYRO_FIFO_HEAD, 
+                gyro_frame_arr[i].x, 
+                gyro_frame_arr[i].y, 
+                gyro_frame_arr[i].z, 
+             current_frm_ts, 
+             ACC_FIFO_HEAD, 
+             acc_frame_arr[i].x, 
+             acc_frame_arr[i].y, 
+             acc_frame_arr[i].z, 
+             current_frm_ts, 
+             MAG_FIFO_HEAD, 
+             mag_comp_xyz.x, 
+             mag_comp_xyz.y, 
+             mag_comp_xyz.z, 
+             current_frm_ts); 
+             buf += len; 
+             err += len; 
+		} 
+} 
+}
 /*only for A G && A M G*/
-if ((client_data->fifo_data_sel == BMI_FIFO_G_A_SEL) || (client_data->fifo_data_sel == BMI_FIFO_M_G_A_SEL))
-{
-
-	for (i = 0; i < gyro_frm_cnt; i++)
-	{ 
-		if (fifo_time) {
-			/*sensor timeLSB
-			* (fifo_time - sensortime_duration_tbl[odr.gyro_odr].ts_duration_lsb*(gyro_frm_cnt - i - 1))*/
-			/*dia(sensor_time) = fifo_time & (0xff), uint:LSB, 39.0625us*/
-			
-			/*AP tinmestamp 390625/10000 = 625 /16 */
-			
-			/*BMI_CALL_API(get_sensor_time)(&sensor_time);
-			printk(KERN_INFO "sensor_time %d, fifo_time %lld, delat_time %d\n", sensor_time, fifo_time, sensor_time - (u32)fifo_time);*/
-			current_frm_ts = current_apts_us - ((fifo_time & (sensortime_duration_tbl[odr.gyro_odr].ts_delat)) +
-						(sensortime_duration_tbl[odr.gyro_odr].ts_duration_lsb*(gyro_frm_cnt - i - 1)))*625/16;
-			
-			/*current_frm_ts = (fifo_time - (fifo_time &0xff) -
-					256*(gyro_frm_cnt - i - 1));*/
-		} else 
-			/*current_frm_ts += 256;*/
-		current_frm_ts += sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA;
-		
-		if (mag_frame_arr[i].x)
-		{
-				mag.x = mag_frame_arr[i].x >> 3;
-				mag.y = mag_frame_arr[i].y >> 3;
-				mag.z = mag_frame_arr[i].z >> 1;
-				mag.r = mag_frame_arr[i].r >> 2;
-				bmi160_mag_compensate_xyz_raw(&mag_comp_xyz,mag);
-				len = sprintf(buf, "%s %d %d %d %d %s %d %d %d %d %s %d %d %d %d ",
-					GYRO_FIFO_HEAD,
-					gyro_frame_arr[i].x,
-					gyro_frame_arr[i].y,
-					gyro_frame_arr[i].z,
-					current_frm_ts,
-					ACC_FIFO_HEAD,
-					acc_frame_arr[i].x,
-					acc_frame_arr[i].y,
-					acc_frame_arr[i].z,
-					current_frm_ts,
-					MAG_FIFO_HEAD,
-					mag_comp_xyz.x,
-					mag_comp_xyz.y,
-					mag_comp_xyz.z,
-					current_frm_ts);
-				buf += len;
-				err += len;
-		} else {
-		
-			len = sprintf(buf, "%s %d %d %d %d %s %d %d %d %d ",
-					GYRO_FIFO_HEAD,
-					gyro_frame_arr[i].x,
-					gyro_frame_arr[i].y,
-					gyro_frame_arr[i].z,
-					current_frm_ts,
-					ACC_FIFO_HEAD,
-					acc_frame_arr[i].x,
-					acc_frame_arr[i].y,
-					acc_frame_arr[i].z,
-					current_frm_ts
-					);
-
-				buf += len;
-				err += len;
-		}
-	}		
-
+if (client_data->fifo_data_sel == BMI_FIFO_G_A_SEL) 
+{ 
+  
+	for (i = 0; i < gyro_frm_cnt; i++) { 
+    /*sensor timeLSB*/ 
+    /*dia(sensor_time) = fifo_time & (0xff), uint:LSB, 39.0625us*/ 
+    /*AP tinmestamp 390625/10000 = 625 /16 */ 
+    current_frm_ts += 
+    sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA; 
+  
+  	len = sprintf(buf, 
+    "%s %d %d %d %d %s %d %d %d %d ", 
+    GYRO_FIFO_HEAD, 
+    gyro_frame_arr[i].x, 
+    gyro_frame_arr[i].y, 
+    gyro_frame_arr[i].z, 
+    current_frm_ts, 
+    ACC_FIFO_HEAD, 
+    acc_frame_arr[i].x, 
+    acc_frame_arr[i].y, 
+    acc_frame_arr[i].z, 
+    current_frm_ts 
+    ); 
+  
+  buf += len; 
+  err += len; 
+	} 
 }
 
 /*only for A M */
-if (client_data->fifo_data_sel == BMI_FIFO_M_A_SEL)
-{
-	for (i = 0; i < acc_frm_cnt; i++)
-	{ 
-		if (fifo_time) {
-			/*sensor timeLSB*/
-			/*dia(sensor_time) = fifo_time & (0xff), uint:LSB, 39.0625us*/
-			
-			/*AP tinmestamp 390625/10000 = 625 /16 */
-			current_frm_ts = current_apts_us - ((fifo_time & (sensortime_duration_tbl[odr.acc_odr].ts_delat)) +
-					(sensortime_duration_tbl[odr.acc_odr].ts_duration_lsb*(acc_frm_cnt - i - 1)))*625/16;
-			/*current_frm_ts = (fifo_time - (fifo_time &0xff) -
-					256*(gyro_frm_cnt - i - 1));*/
-		} else 
-			/*current_frm_ts += 256;*/
-			current_frm_ts += sensortime_duration_tbl[odr.acc_odr].ts_duration_us*LMADA;
-		
-		if (mag_frame_arr[i].x)
-		{
+if (client_data->fifo_data_sel == BMI_FIFO_M_A_SEL) {
+	for (i = 0; i < acc_frm_cnt; i++) {
+		/*sensor timeLSB*/
+		/*dia(sensor_time) = fifo_time & (0xff), uint:LSB, 39.0625us*/
+		/*AP tinmestamp 390625/10000 = 625 /16 */
+		/*current_frm_ts += 256;*/
+		current_frm_ts +=
+		sensortime_duration_tbl[odr.acc_odr].ts_duration_us*LMADA;
+
+		if (mag_frame_arr[i].x) {
 				mag.x = mag_frame_arr[i].x >> 3;
 				mag.y = mag_frame_arr[i].y >> 3;
 				mag.z = mag_frame_arr[i].z >> 1;
 				mag.r = mag_frame_arr[i].r >> 2;
-				bmi160_mag_compensate_xyz_raw(&mag_comp_xyz,mag);
-				len = sprintf(buf, "%s %d %d %d %d %s %d %d %d %d ",
+			bmi160_mag_compensate_xyz_raw(&mag_comp_xyz, mag);
+				len = sprintf(buf,
+			"%s %d %d %d %d %s %d %d %d %d ",
 					ACC_FIFO_HEAD,
 					acc_frame_arr[i].x,
 					acc_frame_arr[i].y,
@@ -1336,7 +1341,6 @@ if (client_data->fifo_data_sel == BMI_FIFO_M_A_SEL)
 				buf += len;
 				err += len;
 		} else {
-		
 			len = sprintf(buf, "%s %d %d %d %d ",
 					ACC_FIFO_HEAD,
 					acc_frame_arr[i].x,
@@ -1349,70 +1353,53 @@ if (client_data->fifo_data_sel == BMI_FIFO_M_A_SEL)
 				err += len;
 		}
 	}
-
-
-
 }
 
-	/*only forG M*/
-	if (client_data->fifo_data_sel == BMI_FIFO_M_G_SEL)
-	{
-		if (gyro_frm_cnt)
-		{
-			tmp_frm_cnt = gyro_frm_cnt;
-			tmp_odr = odr.gyro_odr;
-		}
-		
-		for (i = 0; i < tmp_frm_cnt; i++)
-		{ 
-			if (fifo_time) {
-				/*sensor timeLSB*/
-				/*dia(sensor_time) = fifo_time & (0xff), uint:LSB, 39.0625us*/
-				
-				/*AP tinmestamp 390625/10000 = 625 /16 */
-				current_frm_ts = current_apts_us - ((fifo_time & (sensortime_duration_tbl[odr.gyro_odr].ts_delat)) +
-						(sensortime_duration_tbl[odr.gyro_odr].ts_duration_lsb*(gyro_frm_cnt - i - 1)))*625/16;
-				/*current_frm_ts = (fifo_time - (fifo_time &0xff) -
-						256*(gyro_frm_cnt - i - 1));*/
-			} else 
-				/*current_frm_ts += 256;*/
-				current_frm_ts += sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA;
-			
-			if (mag_frame_arr[i].x)
-			{
-					mag.x = mag_frame_arr[i].x >> 3;
-					mag.y = mag_frame_arr[i].y >> 3;
-					mag.z = mag_frame_arr[i].z >> 1;
-					mag.r = mag_frame_arr[i].r >> 2;
-					bmi160_mag_compensate_xyz_raw(&mag_comp_xyz,mag);
-					len = sprintf(buf, "%s %d %d %d %d %s %d %d %d %d ",
-						GYRO_FIFO_HEAD,
-						gyro_frame_arr[i].x,
-						gyro_frame_arr[i].y,
-						gyro_frame_arr[i].z,
-						current_frm_ts,
-						MAG_FIFO_HEAD,
-						mag_comp_xyz.x,
-						mag_comp_xyz.y,
-						mag_comp_xyz.z,
-						current_frm_ts);
-					buf += len;
-					err += len;
-			} else {
-			
-				len = sprintf(buf, "%s %d %d %d %d ",
-						GYRO_FIFO_HEAD,
-						gyro_frame_arr[i].x,
-						gyro_frame_arr[i].y,
-						gyro_frame_arr[i].z,
-						current_frm_ts
-						);
-	
-					buf += len;
-					err += len;
-			}
+/*only forG M*/
+if (client_data->fifo_data_sel == BMI_FIFO_M_G_SEL) {
+	if (gyro_frm_cnt) {
+		tmp_frm_cnt = gyro_frm_cnt;
+		/*tmp_odr = odr.gyro_odr;*/
+	}
+
+	for (i = 0; i < tmp_frm_cnt; i++) {
+		current_frm_ts +=
+		sensortime_duration_tbl[odr.gyro_odr].ts_duration_us*LMADA;
+		if (mag_frame_arr[i].x) {
+			mag.x = mag_frame_arr[i].x >> 3;
+			mag.y = mag_frame_arr[i].y >> 3;
+			mag.z = mag_frame_arr[i].z >> 1;
+			mag.r = mag_frame_arr[i].r >> 2;
+			bmi160_mag_compensate_xyz_raw(&mag_comp_xyz, mag);
+			len = sprintf(buf,
+		"%s %d %d %d %d %s %d %d %d %d ",
+				GYRO_FIFO_HEAD,
+				gyro_frame_arr[i].x,
+				gyro_frame_arr[i].y,
+				gyro_frame_arr[i].z,
+				current_frm_ts,
+				MAG_FIFO_HEAD,
+				mag_comp_xyz.x,
+				mag_comp_xyz.y,
+				mag_comp_xyz.z,
+				current_frm_ts);
+			buf += len;
+			err += len;
+		} else {
+
+			len = sprintf(buf, "%s %d %d %d %d ",
+				GYRO_FIFO_HEAD,
+				gyro_frame_arr[i].x,
+				gyro_frame_arr[i].y,
+				gyro_frame_arr[i].z,
+				current_frm_ts
+				);
+
+				buf += len;
+				err += len;
 		}
 	}
+}
 
 
 	return err;
@@ -1428,17 +1415,17 @@ static ssize_t bmi160_fifo_data_out_frame_show(struct device *dev,
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	int err = 0;
 	unsigned int fifo_bytecount_tmp;
-	if (NULL == fifo_data) {
-			dev_err(client_data->dev, "no memory available in fifo_data_frame\n");
-			err = -ENOMEM;
-			//goto exit_err_clean;
+	if (NULL == g_fifo_data_arr) {
+			dev_err(client_data->dev,
+				"no memory available in fifo_data_frame\n");
+			return -ENOMEM;
 	}
 
 	if (client_data->pw.acc_pm == 2 && client_data->pw.gyro_pm == 2
-					&& client_data->pw.mag_pm == 2)
-	{
+					&& client_data->pw.mag_pm == 2) {
 		dev_err(client_data->dev, "pw_acc: %d, pw_gyro: %d, pw_mag:%d\n",
-			client_data->pw.acc_pm, client_data->pw.gyro_pm, client_data->pw.mag_pm);
+			client_data->pw.acc_pm, client_data->pw.gyro_pm,
+				client_data->pw.mag_pm);
 		return -EINVAL;
 	}
 	if (!client_data->fifo_data_sel)
@@ -1446,36 +1433,32 @@ static ssize_t bmi160_fifo_data_out_frame_show(struct device *dev,
 			"no selsect sensor fifo, fifo_data_sel:%d\n",
 						client_data->fifo_data_sel);
 
-	if (client_data->fifo_bytecount == 0) {
-              dev_err(client_data->dev, "client_data->fifo_bytecount == 0 return");
+	if (client_data->fifo_bytecount == 0)
 		return -EINVAL;
-       }
-	
+
 	g_current_apts_us = get_current_timestamp();
-	
+
 	BMI_CALL_API(fifo_length)(&fifo_bytecount_tmp);
 	if (fifo_bytecount_tmp > client_data->fifo_bytecount)
 		client_data->fifo_bytecount = fifo_bytecount_tmp;
-	
-	if (client_data->fifo_bytecount > 200) {
+	if (client_data->fifo_bytecount > 210) {
 		err += BMI_CALL_API(set_command_register)(CMD_CLR_FIFO_DATA);
-		client_data->fifo_bytecount = 200;
-		
+		client_data->fifo_bytecount = 210;
 	}
 	if (!err) {
-		memset(fifo_data, 0, 2048);
+		memset(g_fifo_data_arr, 0, 2048);
 		err = bmi_burst_read_wrapper(client_data->device.dev_addr,
-			BMI160_USER_FIFO_DATA__REG, fifo_data,
+			BMI160_USER_FIFO_DATA__REG, g_fifo_data_arr,
 						client_data->fifo_bytecount);
 	} else
 		dev_err(client_data->dev, "read fifo leght err");
-	
-	if (err){
+	if (err) {
 		dev_err(client_data->dev, "brust read fifo err\n");
 		return err;
 	}
-		err = bmi_fifo_analysis_handle(client_data, fifo_data,
-					client_data->fifo_bytecount, buf);
+		err = bmi_fifo_analysis_handle(client_data, g_fifo_data_arr,
+			client_data->fifo_bytecount, buf);
+
 
 	return err;
 }
@@ -1640,6 +1623,59 @@ static ssize_t bmi160_fifo_int_tag_en_store(struct device *dev,
 	return count;
 }
 
+static int bmi160_set_acc_op_mode(struct bmi_client_data *client_data,
+							unsigned long op_mode)
+{
+	int err = 0;
+	unsigned char stc_enable;
+
+	mutex_lock(&client_data->mutex_op_mode);
+
+	if (op_mode < BMI_ACC_PM_MAX) {
+		switch (op_mode) {
+		case BMI_ACC_PM_NORMAL:
+			err = BMI_CALL_API(set_command_register)
+			(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_NORMAL]);
+			client_data->pw.acc_pm = BMI_ACC_PM_NORMAL;
+			mdelay(10);
+			break;
+		case BMI_ACC_PM_LP1:
+			err = BMI_CALL_API(set_command_register)
+			(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_LP1]);
+			client_data->pw.acc_pm = BMI_ACC_PM_LP1;
+			mdelay(3);
+			break;
+		case BMI_ACC_PM_SUSPEND:
+			BMI_CALL_API(get_step_counter_enable)(&stc_enable);
+			if (stc_enable == 0) {
+				err = BMI_CALL_API(set_command_register)
+				(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_SUSPEND]);
+				client_data->pw.acc_pm = BMI_ACC_PM_SUSPEND;
+				mdelay(10);
+			}
+			break;
+		case BMI_ACC_PM_LP2:
+			err = BMI_CALL_API(set_command_register)
+			(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_LP2]);
+			client_data->pw.acc_pm = BMI_ACC_PM_LP2;
+			mdelay(3);
+			break;
+		default:
+			mutex_unlock(&client_data->mutex_op_mode);
+			return -EINVAL;
+		}
+	} else {
+		mutex_unlock(&client_data->mutex_op_mode);
+		return -EINVAL;
+	}
+
+	mutex_unlock(&client_data->mutex_op_mode);
+
+	pr_debug("op_mode=%lu, pw_acc=%u, by %pS\n",
+		op_mode, client_data->pw.acc_pm, __builtin_return_address(0));
+
+	return err;
+}
 
 static ssize_t bmi160_temperature_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -1653,19 +1689,6 @@ static ssize_t bmi160_temperature_show(struct device *dev,
 		err = sprintf(buf, "0x%x\n", temp);
 
 	return err;
-}
-
-static ssize_t bmi160_place_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct input_dev *input = to_input_dev(dev);
-	struct bmi_client_data *client_data = input_get_drvdata(input);
-	int place = BOSCH_SENSOR_PLACE_UNKNOWN;
-
-	if (NULL != client_data->bst_pd)
-		place = client_data->bst_pd->place;
-
-	return sprintf(buf, "%d\n", place);
 }
 
 static ssize_t bmi160_place_store(struct device *dev,
@@ -1685,6 +1708,19 @@ static ssize_t bmi160_place_store(struct device *dev,
 		client_data->bst_pd->place = data;
 
 	return count;
+}
+
+static ssize_t bmi160_place_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct input_dev *input = to_input_dev(dev);
+	struct bmi_client_data *client_data = input_get_drvdata(input);
+	int place = BOSCH_SENSOR_PLACE_UNKNOWN;
+
+	if (NULL != client_data->bst_pd)
+		place = client_data->bst_pd->place;
+
+	return sprintf(buf, "%d\n", place);
 }
 
 static ssize_t bmi160_delay_show(struct device *dev,
@@ -1717,8 +1753,9 @@ static ssize_t bmi160_delay_store(struct device *dev,
 
 	if (data < BMI_DELAY_MIN)
 		data = BMI_DELAY_MIN;
+	pr_debug("data = %lu\n", data);
 
-	atomic_set(&client_data->delay, data);
+	atomic_set(&client_data->delay, (unsigned int)data);
 
 	return count;
 }
@@ -1728,12 +1765,9 @@ static ssize_t bmi160_enable_show(struct device *dev,
 {
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
-	int err;
 
-	mutex_lock(&client_data->mutex_enable);
-	err = sprintf(buf, "%d\n", client_data->wkqueue_en);
-	mutex_unlock(&client_data->mutex_enable);
-	return err;
+	return sprintf(buf, "%d\n", atomic_read(&client_data->wkqueue_en));
+
 }
 
 static ssize_t bmi160_enable_store(struct device *dev,
@@ -1743,25 +1777,35 @@ static ssize_t bmi160_enable_store(struct device *dev,
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	int err;
-	unsigned long data;
+	unsigned long enable;
+	int pre_enable = atomic_read(&client_data->wkqueue_en);
 
-	err = kstrtoul(buf, 10, &data);
+	err = kstrtoul(buf, 10, &enable);
 	if (err)
 		return err;
 
-	data = data ? 1 : 0;
+	enable = enable ? 1 : 0;
+	pr_debug("pre_enable = %d, enable = %lu\n", pre_enable, enable);
 	mutex_lock(&client_data->mutex_enable);
-	if (data != client_data->wkqueue_en) {
-		if (data) {
-			schedule_delayed_work(
-					&client_data->work,
-					msecs_to_jiffies(atomic_read(
-							&client_data->delay)));
-		} else
-			cancel_delayed_work_sync(&client_data->work);
+	if (enable) {
+		if (pre_enable == 0) {
+			bmi160_set_acc_op_mode(client_data,
+							BMI_ACC_PM_NORMAL);
+			schedule_delayed_work(&client_data->work,
+			msecs_to_jiffies(atomic_read(&client_data->delay)));
+			atomic_set(&client_data->wkqueue_en, 1);
+		}
 
-		client_data->wkqueue_en = data;
+	} else {
+		if (pre_enable == 1) {
+			bmi160_set_acc_op_mode(client_data,
+							BMI_ACC_PM_SUSPEND);
+
+			cancel_delayed_work_sync(&client_data->work);
+			atomic_set(&client_data->wkqueue_en, 0);
+		}
 	}
+
 	mutex_unlock(&client_data->mutex_enable);
 
 	return count;
@@ -1830,28 +1874,80 @@ static ssize_t bmi160_anymot_threshold_store(struct device *dev,
 	return count;
 }
 
-static ssize_t bmi160_step_detector_show(struct device *dev,
+static ssize_t bmi160_step_detector_status_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	u8 data=0;
+	u8 data = 0;
 	u8 step_det;
 	int err;
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	err = BMI_CALL_API(get_stepdetector_enable)(&step_det);
+	/*bmi160_get_status0_step_int*/
 	if (err < 0)
 		return err;
-	if ((step_det == 1) &&(client_data->std == 1)){
+/*client_data->std will be updated in bmi_stepdetector_interrupt_handle */
+	if ((step_det == 1) && (client_data->std == 1)) {
 		data = 1;
 		client_data->std = 0;
 		}
 	else {
-		data = 0;			
+		data = 0;
 		}
+	return snprintf(buf, 16, "%d\n", data);
+}
+
+static ssize_t bmi160_step_detector_enable_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned char data;
+	int err;
+
+	err = BMI_CALL_API(get_stepdetector_enable)(&data);
+
+	if (err < 0)
+		return err;
 	return sprintf(buf, "%d\n", data);
 }
 
+static ssize_t bmi160_step_detector_enable_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long data;
+	int err;
 
+	err = kstrtoul(buf, 10, &data);
+	if (err)
+		return err;
+
+	err = BMI_CALL_API(set_stepdetector_enable)((unsigned char)data);
+
+	if (err < 0)
+		return -EIO;
+	return count;
+}
+
+
+static int sigmotion_enable_interrupts(u8 sig_map_int_pin)
+{
+	int ret = 0;
+/*0x60  */
+	ret += bmi160_set_int_anymotion_threshold(0x1e);
+/* 0x62(bit 3~2)	0=1.5s */
+	ret += bmi160_set_int_significant_motion_skip(0);
+/*0x62(bit 5~4)	1=0.5s*/
+	ret += bmi160_set_int_significant_motion_proof(1);
+/*0x50 (bit 0, 1, 2)  INT_EN_0 anymo x y z*/
+	ret += bmi160_map_significant_motion_interrupt(sig_map_int_pin);
+/*0x62 (bit 1) INT_MOTION_3	int_sig_mot_sel*/
+	ret += bmi160_set_int_significant_motion_select(1);
+
+	if (ret)
+		printk(KERN_ERR "bmi160 sig motion failed setting,%d!\n", ret);
+	return ret;
+
+}
 #endif
 
 static ssize_t bmi160_acc_range_show(struct device *dev,
@@ -1944,61 +2040,17 @@ static ssize_t bmi160_acc_op_mode_store(struct device *dev,
 {
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
-	unsigned long op_mode;
 	int err;
-	unsigned char stc_enable;
+	unsigned long op_mode;
 	err = kstrtoul(buf, 10, &op_mode);
 	if (err)
 		return err;
 
-	mutex_lock(&client_data->mutex_op_mode);
-
-	if (op_mode < BMI_ACC_PM_MAX) {
-		switch (op_mode) {
-		case BMI_ACC_PM_NORMAL:
-			err = BMI_CALL_API(set_command_register)
-				(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_NORMAL]);
-			client_data->pw.acc_pm = BMI_ACC_PM_NORMAL;
-			mdelay(3);
-			break;
-		case BMI_ACC_PM_LP1:
-			err = BMI_CALL_API(set_command_register)
-				(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_LP1]);
-			client_data->pw.acc_pm = BMI_ACC_PM_LP1;
-			mdelay(3);
-			break;
-		case BMI_ACC_PM_SUSPEND:
-			BMI_CALL_API(get_step_counter_enable)(&stc_enable);
-			if (stc_enable == 0)
-			{
-				err = BMI_CALL_API(set_command_register)
-					(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_SUSPEND]);
-				client_data->pw.acc_pm = BMI_ACC_PM_SUSPEND;
-				mdelay(3);
-			}
-			break;
-		case BMI_ACC_PM_LP2:
-			err = BMI_CALL_API(set_command_register)
-					(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_LP2]);
-			client_data->pw.acc_pm = BMI_ACC_PM_LP2;
-			mdelay(3);
-			break;
-		default:
-			mutex_unlock(&client_data->mutex_op_mode);
-			return -EINVAL;
-		}
-	} else {
-		mutex_unlock(&client_data->mutex_op_mode);
-		return -EINVAL;
-	}
-
-	mutex_unlock(&client_data->mutex_op_mode);
-
+	err = bmi160_set_acc_op_mode(client_data, op_mode);
 	if (err)
 		return err;
 	else
 		return count;
-
 }
 
 static ssize_t bmi160_acc_value_show(struct device *dev,
@@ -2050,7 +2102,8 @@ static ssize_t bmi160_acc_fast_calibration_x_store(struct device *dev,
 	if (data > 3)
 		return -EINVAL;
 
-	err = BMI_CALL_API(set_accel_foc_trigger)(X_AXIS, data, &accel_offset_x);
+	err = BMI_CALL_API(set_accel_foc_trigger)(X_AXIS,
+					data, &accel_offset_x);
 	if (err)
 		return -EIO;
 
@@ -2075,7 +2128,7 @@ static ssize_t bmi160_acc_fast_calibration_y_store(struct device *dev,
 		const char *buf, size_t count)
 {
 	unsigned long data;
-	int err;	
+	int err;
 	s8 accel_offset_y = 0;
 
 	err = kstrtoul(buf, 10, &data);
@@ -2085,7 +2138,8 @@ static ssize_t bmi160_acc_fast_calibration_y_store(struct device *dev,
 	if (data > 3)
 		return -EINVAL;
 
-	err = BMI_CALL_API(set_accel_foc_trigger)(Y_AXIS, data, &accel_offset_y);
+	err = BMI_CALL_API(set_accel_foc_trigger)(Y_AXIS,
+				data, &accel_offset_y);
 	if (err)
 		return -EIO;
 
@@ -2120,7 +2174,8 @@ static ssize_t bmi160_acc_fast_calibration_z_store(struct device *dev,
 	if (data > 3)
 		return -EINVAL;
 
-	err = BMI_CALL_API(set_accel_foc_trigger)(Z_AXIS, data, &accel_offset_z);
+	err = BMI_CALL_API(set_accel_foc_trigger)(Z_AXIS,
+			data, &accel_offset_z);
 	if (err)
 		return -EIO;
 
@@ -2230,7 +2285,7 @@ static ssize_t bmi160_test_show(struct device *dev,
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	u8 raw_data[15] = {0};
-	u32 sensor_time = 0;
+	unsigned int sensor_time = 0;
 
 	int err;
 	memset(raw_data, 0, sizeof(raw_data));
@@ -2244,7 +2299,7 @@ static ssize_t bmi160_test_show(struct device *dev,
 	sensor_time = (u32)(raw_data[14] << 16 | raw_data[13] << 8
 						| raw_data[12]);
 
-	return sprintf(buf, "%d %d %d %d %d %d %d",
+	return sprintf(buf, "%d %d %d %d %d %d %u",
 					(s16)(raw_data[1] << 8 | raw_data[0]),
 				(s16)(raw_data[3] << 8 | raw_data[2]),
 				(s16)(raw_data[5] << 8 | raw_data[4]),
@@ -2252,7 +2307,6 @@ static ssize_t bmi160_test_show(struct device *dev,
 				(s16)(raw_data[9] << 8 | raw_data[8]),
 				(s16)(raw_data[11] << 8 | raw_data[10]),
 				sensor_time);
-
 }
 
 static ssize_t bmi160_step_counter_enable_show(struct device *dev,
@@ -2323,7 +2377,7 @@ static ssize_t bmi160_step_counter_clc_store(struct device *dev,
 	err = kstrtoul(buf, 10, &data);
 	if (err)
 		return err;
-	
+
 	err = bmi160_clear_step_counter();
 
 	if (err < 0)
@@ -2336,7 +2390,7 @@ static ssize_t bmi160_step_counter_value_show(struct device *dev,
 {
 	s16 data;
 	int err;
-		
+
 	err = BMI_CALL_API(read_step_count)(&data);
 
 	if (err < 0)
@@ -2366,7 +2420,6 @@ static ssize_t bmi160_bmi_value_show(struct device *dev,
 				(s16)(raw_data[7] << 8 | raw_data[6]),
 				(s16)(raw_data[9] << 8 | raw_data[8]),
 				(s16)(raw_data[11] << 8 | raw_data[10]));
-
 }
 
 
@@ -2403,10 +2456,10 @@ static ssize_t bmi160_selftest_store(struct device *dev,
 	u8 acc_odr, range, acc_selftest_amp, acc_selftest_sign;
 
 	dev_notice(client_data->dev, "Selftest for BMI16x starting.\n");
-		
+
 	/*soft reset*/
 	err = BMI_CALL_API(set_command_register)(CMD_RESET_USER_REG);
-	mdelay(70);
+	msleep(70);
 	err += BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_NORMAL]);
 	err += BMI_CALL_API(set_command_register)
@@ -2437,37 +2490,41 @@ static ssize_t bmi160_selftest_store(struct device *dev,
 		* but X_AXIS:0, Y_AXIS:1, Z_AXIS:2
 		* so we need to +1*/
 		err += BMI_CALL_API(set_acc_selftest_axis)(i + 1);
-		mdelay(50);
+		msleep(50);
 		switch (i) {
 		case X_AXIS:
 			/* set negative sign */
 			err += BMI_CALL_API(set_acc_selftest_sign)(0);
-			err += BMI_CALL_API(get_acc_selftest_sign)(&acc_selftest_sign);
+			err +=
+			BMI_CALL_API(get_acc_selftest_sign)(&acc_selftest_sign);
 
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(read_acc_x)(&axis_n_value);
 			dev_info(client_data->dev,
-			"acc_x_selftest_sign:%d, axis_n_value:%d\n", acc_selftest_sign, axis_n_value);
+			"acc_x_selftest_sign:%d, axis_n_value:%d\n",
+			acc_selftest_sign, axis_n_value);
 
 			/* set postive sign */
 			err += BMI_CALL_API(set_acc_selftest_sign)(1);
-			err += BMI_CALL_API(get_acc_selftest_sign)(&acc_selftest_sign);
+			err +=
+			BMI_CALL_API(get_acc_selftest_sign)(&acc_selftest_sign);
 
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(read_acc_x)(&axis_p_value);
 			dev_info(client_data->dev,
-			"acc_x_selftest_sign:%d, axis_p_value:%d\n", acc_selftest_sign, axis_p_value);
+			"acc_x_selftest_sign:%d, axis_p_value:%d\n",
+			acc_selftest_sign, axis_p_value);
 			diff_axis[i] = abs(axis_p_value - axis_n_value);
 			break;
 
 		case Y_AXIS:
 			/* set negative sign */
 			err += BMI_CALL_API(set_acc_selftest_sign)(0);
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(read_acc_y)(&axis_n_value);
 			/* set postive sign */
 			err += BMI_CALL_API(set_acc_selftest_sign)(1);
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(read_acc_y)(&axis_p_value);
 			diff_axis[i] = abs(axis_p_value - axis_n_value);
 			break;
@@ -2475,15 +2532,15 @@ static ssize_t bmi160_selftest_store(struct device *dev,
 		case Z_AXIS:
 			/* set negative sign */
 			err += BMI_CALL_API(set_acc_selftest_sign)(0);
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(read_acc_z)(&axis_n_value);
 			/* set postive sign */
 			err += BMI_CALL_API(set_acc_selftest_sign)(1);
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(read_acc_z)(&axis_p_value);
 			/* also start gyro self test */
 			err += BMI_CALL_API(set_gyr_self_test_start)(1);
-			mdelay(60);
+			msleep(60);
 			err += BMI_CALL_API(get_gyr_self_test)(&gyro_selftest);
 
 			err += BMI_CALL_API(read_acc_z)(&axis_p_value);
@@ -2537,7 +2594,7 @@ static ssize_t bmi160_selftest_store(struct device *dev,
 	err = BMI_CALL_API(set_command_register)(CMD_RESET_USER_REG);
 	if (err)
 		return err;
-	mdelay(50);
+	msleep(50);
 	dev_notice(client_data->dev, "Selftest for BMI16x finished\n");
 	return count;
 }
@@ -2548,9 +2605,7 @@ static ssize_t bmi160_gyro_op_mode_show(struct device *dev,
 {
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
-	u8 gyro_op_mode;
-	bmi160_get_gyro_pmu_status(&gyro_op_mode);
-	return sprintf(buf, "%d, %d\n", gyro_op_mode, client_data->pw.gyro_pm);
+	return sprintf(buf, "%d\n", client_data->pw.gyro_pm);
 }
 
 static ssize_t bmi160_gyro_op_mode_store(struct device *dev,
@@ -2574,19 +2629,22 @@ static ssize_t bmi160_gyro_op_mode_store(struct device *dev,
 			err = BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_gyro_arr[BMI_GYRO_PM_NORMAL]);
 			client_data->pw.gyro_pm = BMI_GYRO_PM_NORMAL;
-			mdelay(3);
+			//mdelay(3);
+			msleep(60);
 			break;
 		case BMI_GYRO_PM_FAST_START:
 			err = BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_gyro_arr[BMI_GYRO_PM_FAST_START]);
 			client_data->pw.gyro_pm = BMI_GYRO_PM_FAST_START;
-			mdelay(3);
+			//mdelay(3);
+			msleep(60);
 			break;
 		case BMI_GYRO_PM_SUSPEND:
 			err = BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_gyro_arr[BMI_GYRO_PM_SUSPEND]);
 			client_data->pw.gyro_pm = BMI_GYRO_PM_SUSPEND;
-			mdelay(3);
+			//mdelay(3);
+			msleep(60);
 			break;
 		default:
 			mutex_unlock(&client_data->mutex_op_mode);
@@ -2599,11 +2657,11 @@ static ssize_t bmi160_gyro_op_mode_store(struct device *dev,
 
 	mutex_unlock(&client_data->mutex_op_mode);
 
+	pr_debug("gyro_pm = %u\n", client_data->pw.gyro_pm);
 	if (err)
 		return err;
 	else
 		return count;
-
 }
 
 static ssize_t bmi160_gyro_value_show(struct device *dev,
@@ -2714,14 +2772,18 @@ static ssize_t bmi160_gyro_fast_calibration_en_store(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	unsigned long data;
-	int err;
+	unsigned long enable;
+	s8 err;
+	s16 gyr_off_x;
+	s16 gyr_off_y;
+	s16 gyr_off_z;
 
-	err = kstrtoul(buf, 10, &data);
+	err = kstrtoul(buf, 10, &enable);
 	if (err)
 		return err;
 
-	//err = BMI_CALL_API(set_foc_gyr_en)((unsigned char)data);
+	err = BMI_CALL_API(set_foc_gyr_en)((u8)enable,
+				&gyr_off_x, &gyr_off_y, &gyr_off_z);
 
 	if (err < 0)
 		return -EIO;
@@ -2731,10 +2793,10 @@ static ssize_t bmi160_gyro_fast_calibration_en_store(struct device *dev,
 static ssize_t bmi160_gyro_offset_x_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned char data = 0;
-	int err = 0;
+	s16 data = 0;
+	s8 err = 0;
 
-//	err = BMI_CALL_API(get_gyro_off_comp_xaxis)(&data);
+	err = BMI_CALL_API(get_gyro_off_comp_xaxis)(&data);
 
 	if (err < 0)
 		return err;
@@ -2746,13 +2808,13 @@ static ssize_t bmi160_gyro_offset_x_store(struct device *dev,
 		const char *buf, size_t count)
 {
 	unsigned long data;
-	int err;
+	s8 err;
 
 	err = kstrtoul(buf, 10, &data);
 	if (err)
 		return err;
 
-	err = BMI_CALL_API(set_gyro_offset_compensation_xaxis)((unsigned char)data);
+	err = BMI_CALL_API(set_gyro_offset_compensation_xaxis)((s16)data);
 
 	if (err < 0)
 		return -EIO;
@@ -2762,10 +2824,10 @@ static ssize_t bmi160_gyro_offset_x_store(struct device *dev,
 static ssize_t bmi160_gyro_offset_y_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned char data = 0;
-	int err = 0;
+	s16 data = 0;
+	s8 err = 0;
 
-//	err = BMI_CALL_API(get_gyro_off_comp_yaxis)(&data);
+	err = BMI_CALL_API(get_gyro_off_comp_yaxis)(&data);
 
 	if (err < 0)
 		return err;
@@ -2777,13 +2839,13 @@ static ssize_t bmi160_gyro_offset_y_store(struct device *dev,
 		const char *buf, size_t count)
 {
 	unsigned long data;
-	int err;
+	s8 err;
 
 	err = kstrtoul(buf, 10, &data);
 	if (err)
 		return err;
 
-	err = BMI_CALL_API(set_gyro_offset_compensation_yaxis)((unsigned char)data);
+	err = BMI_CALL_API(set_gyro_offset_compensation_yaxis)((s16)data);
 
 	if (err < 0)
 		return -EIO;
@@ -2793,10 +2855,10 @@ static ssize_t bmi160_gyro_offset_y_store(struct device *dev,
 static ssize_t bmi160_gyro_offset_z_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned char data = 0;
+	s16 data = 0;
 	int err = 0;
 
-//	err = BMI_CALL_API(get_gyro_off_comp_zaxis)(&data);
+	err = BMI_CALL_API(get_gyro_off_comp_zaxis)(&data);
 
 	if (err < 0)
 		return err;
@@ -2814,7 +2876,7 @@ static ssize_t bmi160_gyro_offset_z_store(struct device *dev,
 	if (err)
 		return err;
 
-	err = BMI_CALL_API(set_gyro_offset_compensation_zaxis)((unsigned char)data);
+	err = BMI_CALL_API(set_gyro_offset_compensation_zaxis)((s16)data);
 
 	if (err < 0)
 		return -EIO;
@@ -2831,9 +2893,15 @@ static ssize_t bmi160_mag_op_mode_show(struct device *dev,
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	u8 mag_op_mode;
-	bmi160_get_mag_pmu_status(&mag_op_mode);
-
-	return sprintf(buf, "%d, %d\n", mag_op_mode,client_data->pw.mag_pm);
+	s8 err;
+	err = bmi160_get_mag_pmu_status(&mag_op_mode);
+	if (err) {
+		dev_err(client_data->dev,
+			"Failed to get BMI160 mag power mode:%d\n", err);
+		return err;
+	} else
+		return sprintf(buf, "%d, reg:%d\n",
+					client_data->pw.mag_pm, mag_op_mode);
 }
 
 static ssize_t bmi160_mag_op_mode_store(struct device *dev,
@@ -2844,19 +2912,18 @@ static ssize_t bmi160_mag_op_mode_store(struct device *dev,
 	struct bmi_client_data *client_data = input_get_drvdata(input);
 	unsigned long op_mode;
 	int err;
-	
+
 	err = kstrtoul(buf, 10, &op_mode);
 	if (err)
 		return err;
 
 	if (op_mode == client_data->pw.mag_pm)
 		return count;
-		
+
 	mutex_lock(&client_data->mutex_op_mode);
 
 
 	if (op_mode < BMI_MAG_PM_MAX) {
-
 		switch (op_mode) {
 		case BMI_MAG_PM_NORMAL:
 			/* need to modify as mag sensor connected,
@@ -2864,81 +2931,24 @@ static ssize_t bmi160_mag_op_mode_store(struct device *dev,
 			 * write operation
 			 * 0x4c(op mode control reg)
 			 * enables normal mode in magnetometer */
-			#if 0
-			err += BMI_CALL_API(set_mag_manual_en)(1);
-			
-			bmi160_set_mag_and_secondary_if_powermode(BMI160_MAG_FORCE_MODE);
-			
-			err += BMI_CALL_API(set_command_register)
-				(bmi_pmu_cmd_mag_arr[BMI_MAG_PM_NORMAL]);
-			err += BMI_CALL_API(set_mag_write_data)(0x01);/*4f*/
-			mdelay(5);
-			err += BMI_CALL_API(set_mag_write_addr)(0x4b);/*4e*/
-			mdelay(5);
-			/*default sensor odr(10hz), normal*/
-			err += BMI_CALL_API(set_mag_write_data)(0x00);
-			mdelay(50);
-			err += BMI_CALL_API(set_mag_write_addr)(0x4c);
-			mdelay(50);
-			err += BMI_CALL_API(set_mag_manual_en)(0);
-			#endif
-			
-			err = bmi160_set_mag_and_secondary_if_powermode(BMI160_MAG_FORCE_MODE);
-			
-			if (err)
-				printk(KERN_INFO "BMI160 bmm150 forced mode error\n");
-			client_data->pw.mag_pm = op_mode;
+			err = bmi160_set_mag_and_secondary_if_powermode
+						(BMI160_MAG_FORCE_MODE);
+			client_data->pw.mag_pm = BMI_MAG_PM_NORMAL;
 			break;
-		case	BMI_MAG_PM_LP1:
+		case BMI_MAG_PM_LP1:
 			/* need to modify as mag sensor connected,
 			 * set write address to 0x4 band triggers
 			 * write operation
 			 * 0x4b(bmm150, power control reg, bit0)
 			 * enables power in magnetometer*/
-			/*err += BMI_CALL_API(set_mag_write_data)(0x01);
-			err += BMI_CALL_API(set_mag_write_addr)(0x4b);
-			mdelay(2);*/
-			/* need to modify as mag sensor connected,
-			 * set write address to 0x4c and triggers
-			 * write operation
-			 * 0x4c(op mode control reg)
-			 * enables normal mode in magnetometer */
-			 #if 0
-			 err += BMI_CALL_API(set_mag_manual_en)(1);
-			/*default sensor odr, force*/
-			err += BMI_CALL_API(set_mag_write_data)(0x02);
-			err += BMI_CALL_API(set_mag_write_addr)(0x4c);
-			mdelay(2);
-			err += BMI_CALL_API(set_mag_manual_en)(0);
-			err += BMI_CALL_API(set_command_register)
-					(bmi_pmu_cmd_mag_arr[BMI_MAG_PM_LP1]);
-			client_data->pw.mag_pm = op_mode;
-			mdelay(3);
-			#endif
-			
-			err = bmi160_set_mag_and_secondary_if_powermode(BMI160_MAG_FORCE_MODE);
-			client_data->pw.mag_pm = op_mode;
+			err = bmi160_set_mag_and_secondary_if_powermode
+						(BMI160_MAG_FORCE_MODE);
+			client_data->pw.mag_pm = BMI_MAG_PM_LP1;
 			break;
 		case BMI_MAG_PM_SUSPEND:
 		case BMI_MAG_PM_LP2:
-			
-			#if 0
-			err += BMI_CALL_API(set_mag_manual_en)(1);
-
-			/* need to modify as mag sensor connected,
-			* set write address to 4b and triggers
-			* write operation (disable power in magnetometer)
-			*/
-			err += BMI_CALL_API(set_mag_write_data)(0x00);
-			/*bmm sensor suspend*/
-			err += BMI_CALL_API(set_mag_write_addr)(0x4b);
-			err += BMI_CALL_API(set_mag_manual_en)(0);
-			err += BMI_CALL_API(set_command_register)
-				(bmi_pmu_cmd_mag_arr[BMI_MAG_PM_SUSPEND]);
-			client_data->pw.mag_pm = BMI_MAG_PM_SUSPEND;
-			mdelay(3);
-			#endif
-			err = bmi160_set_mag_and_secondary_if_powermode(BMI160_MAG_SUSPEND_MODE);
+			err = bmi160_set_mag_and_secondary_if_powermode
+						(BMI160_MAG_SUSPEND_MODE);
 			client_data->pw.mag_pm = op_mode;
 			break;
 		default:
@@ -2952,14 +2962,15 @@ static ssize_t bmi160_mag_op_mode_store(struct device *dev,
 
 	mutex_unlock(&client_data->mutex_op_mode);
 
-	if (err)
-	{
-		printk(KERN_INFO "BMI160 bmm150 forced mode error\n");
+	pr_debug("op_mode = %lu, pw_mag = %u\n",
+		op_mode, client_data->pw.mag_pm);
+	if (err) {
+		dev_err(client_data->dev,
+			"Failed to switch BMI160 mag power mode:%d\n",
+			client_data->pw.mag_pm);
 		return err;
-	}
-	else
+	} else
 		return count;
-
 }
 
 static ssize_t bmi160_mag_odr_show(struct device *dev,
@@ -3002,8 +3013,8 @@ static ssize_t bmi160_mag_odr_store(struct device *dev,
 static ssize_t bmi160_mag_i2c_address_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned char data;
-	int err;
+	u8 data;
+	s8 err;
 
 	err = BMI_CALL_API(set_mag_manual_en)(1);
 	err += BMI_CALL_API(get_i2c_device_addr)(&data);
@@ -3026,7 +3037,7 @@ static ssize_t bmi160_mag_i2c_address_store(struct device *dev,
 		return err;
 
 	err += BMI_CALL_API(set_mag_manual_en)(1);
-	if (err == 0)
+	if (!err)
 		err += BMI_CALL_API(set_i2c_device_addr)((unsigned char)data);
 	err += BMI_CALL_API(set_mag_manual_en)(0);
 
@@ -3049,7 +3060,7 @@ static ssize_t bmi160_mag_value_show(struct device *dev,
 
 	if (err < 0) {
 		memset(&data, 0, sizeof(data));
-		dev_err(client_data->dev,"mag not ready!\n");
+		dev_err(client_data->dev, "mag not ready!\n");
 	}
 	bmi160_udata.x = data.x;
 	bmi160_udata.y = data.y;
@@ -3097,11 +3108,10 @@ static ssize_t bmi160_mag_offset_store(struct device *dev,
 static ssize_t bmi160_mag_chip_id_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	int err = 0;
-	unsigned char mag_chipid;
-	
-	err = bmi160_set_mag_manual_en(0x01);
+	s8 err = 0;
+	u8 mag_chipid;
 
+	err = bmi160_set_mag_manual_en(0x01);
 	/* read mag chip_id value */
 	err += bmi160_set_mag_read_addr(BMM050_CHIP_ID);
 	/* 0x04 is mag_x lsb register */
@@ -3111,17 +3121,13 @@ static ssize_t bmi160_mag_chip_id_show(struct device *dev,
 	/* Must add this commands to re-set data register addr of mag sensor */
 	/* 0x42 is  bmm150 data register address */
 	err += bmi160_set_mag_read_addr(0x42);
-	
 	err += bmi160_set_mag_manual_en(0x00);
-	
+
 	if (err)
 		return err;
 
 	return sprintf(buf, "chip_id:0x%x\n", mag_chipid);
-
 }
-
-
 
 #endif
 
@@ -3138,13 +3144,16 @@ static ssize_t bmi_enable_int_store(struct device *dev,
 		return -EINVAL;
 
 	if (interrupt_type <= BMI_FLAT_INT) {
-		if (BMI_CALL_API(set_int_en_0)(bmi_interrupt_type[interrupt_type], value) < 0)
+		if (BMI_CALL_API(set_int_en_0)
+				(bmi_interrupt_type[interrupt_type], value) < 0)
 			return -EINVAL;
 	} else if (interrupt_type <= BMI_FWM_INT) {
-		if (BMI_CALL_API(set_int_en_1)(bmi_interrupt_type[interrupt_type], value) < 0)
+		if (BMI_CALL_API(set_int_en_1)
+			(bmi_interrupt_type[interrupt_type], value) < 0)
 			return -EINVAL;
 	} else {
-		if (BMI_CALL_API(set_int_en_2)(bmi_interrupt_type[interrupt_type], value) < 0)
+		if (BMI_CALL_API(set_int_en_2)
+			(bmi_interrupt_type[interrupt_type], value) < 0)
 			return -EINVAL;
 	}
 
@@ -3158,13 +3167,10 @@ static ssize_t bmi_register_show(struct device *dev,
 {
 	struct input_dev *input = to_input_dev(dev);
 	struct bmi_client_data *client_data = input_get_drvdata(input);
-	int err;
 
 	bmi_dump_reg(client_data);
 
-	err = sprintf(buf, "Dump OK\n");
-
-	return err;
+	return sprintf(buf, "Dump OK\n");
 }
 
 static ssize_t bmi_register_store(struct device *dev,
@@ -3175,26 +3181,27 @@ static ssize_t bmi_register_store(struct device *dev,
 	int data;
 	u8 write_reg_add = 0;
 	u8 write_data = 0;
+	struct input_dev *input = to_input_dev(dev);
+	struct bmi_client_data *client_data = input_get_drvdata(input);
 
 	err = sscanf(buf, "%3d %3d", &reg_addr, &data);
 	if (err < 2)
 		return err;
 
-	if (data > 0xff) {
+	if (data > 0xff)
 		return -EINVAL;
-	}
 
 	write_reg_add = (u8)reg_addr;
 	write_data = (u8)data;
-	err = BMI_CALL_API(write_reg)(write_reg_add, &write_data, 1);
+	err += BMI_CALL_API(write_reg)(write_reg_add, &write_data, 1);
 
 	if (!err) {
-		printk(KERN_INFO "write reg 0x%2x, value= 0x%2x\n",
+		dev_info(client_data->dev, "write reg 0x%2x, value= 0x%2x\n",
 			reg_addr, data);
 	} else {
-		printk(KERN_ERR "write reg fail\n");
+		dev_err(client_data->dev, "write reg fail\n");
+		return err;
 	}
-
 	return count;
 }
 
@@ -3266,7 +3273,8 @@ static DEVICE_ATTR(acc_offset_z, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
 static DEVICE_ATTR(test, S_IRUGO,
 		bmi160_test_show, NULL);
 static DEVICE_ATTR(stc_enable, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
-		bmi160_step_counter_enable_show, bmi160_step_counter_enable_store);
+		bmi160_step_counter_enable_show,
+		bmi160_step_counter_enable_store);
 static DEVICE_ATTR(stc_mode, S_IWUSR|S_IWGRP|S_IWOTH,
 		NULL, bmi160_step_counter_mode_store);
 static DEVICE_ATTR(stc_clc, S_IWUSR|S_IWGRP|S_IWOTH,
@@ -3292,10 +3300,6 @@ static DEVICE_ATTR(gyro_offset_y, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
 bmi160_gyro_offset_y_show, bmi160_gyro_offset_y_store);
 static DEVICE_ATTR(gyro_offset_z, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
 bmi160_gyro_offset_z_show, bmi160_gyro_offset_z_store);
-
-
-
-
 
 #ifdef BMI160_MAG_INTERFACE_SUPPORT
 static DEVICE_ATTR(mag_op_mode, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
@@ -3323,7 +3327,10 @@ static DEVICE_ATTR(anymot_duration, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
 static DEVICE_ATTR(anymot_threshold, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
 		bmi160_anymot_threshold_show, bmi160_anymot_threshold_store);
 static DEVICE_ATTR(std_stu, S_IRUGO,
-		bmi160_step_detector_show, NULL);
+		bmi160_step_detector_status_show, NULL);
+static DEVICE_ATTR(std_en, S_IRUGO|S_IWUSR|S_IWGRP|S_IWOTH,
+		bmi160_step_detector_enable_show,
+		bmi160_step_detector_enable_store);
 
 
 #endif
@@ -3400,6 +3407,8 @@ static struct attribute *bmi160_attributes[] = {
 	&dev_attr_anymot_duration.attr,
 	&dev_attr_anymot_threshold.attr,
 	&dev_attr_std_stu.attr,
+	&dev_attr_std_en.attr,
+
 #endif
 	&dev_attr_register.attr,
 	&dev_attr_bmi_value.attr,
@@ -3439,13 +3448,11 @@ static void bmi_slope_interrupt_handle(struct bmi_client_data *client_data)
 		if (anym_first[i]) {
 			/*1: negative*/
 			if (anym_sign)
-				//dev_notice(client_data->dev,
-				printk(KERN_INFO
+				dev_notice(client_data->dev,
 				"Anymotion interrupt happend!"
 				"%s axis, negative sign\n", bmi_axis_name[i]);
 			else
-				//dev_notice(client_data->dev,
-				printk(KERN_INFO
+				dev_notice(client_data->dev,
 				"Anymotion interrupt happend!"
 				"%s axis, postive sign\n", bmi_axis_name[i]);
 		}
@@ -3454,54 +3461,21 @@ static void bmi_slope_interrupt_handle(struct bmi_client_data *client_data)
 
 }
 
-static void bmi_fifo_frame_bytes_extend_calc(struct bmi_client_data *client_data, unsigned int *fifo_frmbytes_extend)
-{
-
-	switch (client_data->fifo_data_sel) {
-	case BMI_FIFO_A_SEL:
-	case BMI_FIFO_G_SEL:
-		*fifo_frmbytes_extend = 7;
-		break;
-	case BMI_FIFO_G_A_SEL:
-		*fifo_frmbytes_extend = 13;
-		break;
-	case BMI_FIFO_M_SEL:
-		*fifo_frmbytes_extend = 9;
-		break;
-	case BMI_FIFO_M_A_SEL:
-	case BMI_FIFO_M_G_SEL:
-		*fifo_frmbytes_extend = 15;/*8(mag) + 6(gyro or acc) +1(head) = 15*/
-		break;
-	case BMI_FIFO_M_G_A_SEL:
-		*fifo_frmbytes_extend = 21;/*8(mag) + 6(gyro or acc) + 6 + 1 = 21*/
-		break;
-	default:
-		*fifo_frmbytes_extend = 0;
-		break;
-
-	};
 
 
-
-}
-
-
-static void bmi_fifo_watermark_interrupt_handle(struct bmi_client_data *client_data)
+static void bmi_fifo_watermark_interrupt_handle
+				(struct bmi_client_data *client_data)
 {
 	int err = 0;
-	//	unsigned char fifo_out_data[FIFO_DATA_BUFSIZE] ={0};
 	unsigned int fifo_len0 = 0;
 	unsigned int  fifo_frmbytes_ext = 0;
 	unsigned char *fifo_data = NULL;
 	fifo_data = kzalloc(FIFO_DATA_BUFSIZE, GFP_KERNEL);
-
+	/*TO DO*/
 	if (NULL == fifo_data) {
 			dev_err(client_data->dev, "no memory available");
 			err = -ENOMEM;
-			//goto exit_err_clean;
 	}
-
-
 	bmi_fifo_frame_bytes_extend_calc(client_data, &fifo_frmbytes_ext);
 
 	if (client_data->pw.acc_pm == 2 && client_data->pw.gyro_pm == 2
@@ -3524,14 +3498,14 @@ static void bmi_fifo_watermark_interrupt_handle(struct bmi_client_data *client_d
 	if (!err) {
 		err = bmi_burst_read_wrapper(client_data->device.dev_addr,
 			BMI160_USER_FIFO_DATA__REG, fifo_data,
-						client_data->fifo_bytecount + fifo_frmbytes_ext);
+			client_data->fifo_bytecount + fifo_frmbytes_ext);
 	} else
 		dev_err(client_data->dev, "read fifo leght err");
 
 	if (err)
 		dev_err(client_data->dev, "brust read fifo err\n");
 	/*err = bmi_fifo_analysis_handle(client_data, fifo_data,
-					client_data->fifo_bytecount + 20, fifo_out_data);*/
+			client_data->fifo_bytecount + 20, fifo_out_data);*/
 	if (fifo_data != NULL) {
 		kfree(fifo_data);
 		fifo_data = NULL;
@@ -3539,23 +3513,25 @@ static void bmi_fifo_watermark_interrupt_handle(struct bmi_client_data *client_d
 
 }
 
-static void bmi_signification_motion_interrupt_handle(struct bmi_client_data *client_data)
+static void bmi_signification_motion_interrupt_handle(
+		struct bmi_client_data *client_data)
 {
-	printk(KERN_INFO"bmi_signification_motion_interrupt_handle \n");
+	printk(KERN_INFO "bmi_signification_motion_interrupt_handle\n");
 	input_event(client_data->input, EV_MSC, INPUT_EVENT_SGM, 1);
-	//input_report_rel(client_data->input,INPUT_EVENT_SGM,1);
+/*input_report_rel(client_data->input,INPUT_EVENT_SGM,1);*/
 	input_sync(client_data->input);
+	bmi160_set_command_register(CMD_RESET_INT_ENGINE);
 
 }
-static void bmi_stepdetector_interrupt_handle(struct bmi_client_data *client_data)
+static void bmi_stepdetector_interrupt_handle(
+	struct bmi_client_data *client_data)
 {
-	
-	printk(KERN_INFO"bmi_stepdetector_interrupt_handle \n");
-	/*
+	printk(KERN_INFO "bmi_stepdetector_interrupt_handle\n");
+/*
 	input_report_rel(client_data->input,INPUT_EVENT_STEP_DETECTOR,1);
 	input_sync(client_data->input);
-	*/
-	client_data->std =1;
+*/
+	client_data->std = 1;
 }
 
 static void bmi_irq_work_func(struct work_struct *work)
@@ -3569,14 +3545,23 @@ static void bmi_irq_work_func(struct work_struct *work)
 	client_data->device.bus_read(client_data->device.dev_addr,
 				BMI160_USER_INT_STATUS_0_ADDR, int_status, 4);
 
-	if (BMI160_GET_BITSLICE(int_status[0], BMI160_USER_INT_STATUS_0_ANYM))
+	if (BMI160_GET_BITSLICE(int_status[0],
+					BMI160_USER_INT_STATUS_0_ANYM))
 		bmi_slope_interrupt_handle(client_data);
-	if (BMI160_GET_BITSLICE(int_status[0], BMI160_USER_INT_STATUS_0_SIGMOT_INT))
-		bmi_signification_motion_interrupt_handle(client_data);
-	if (BMI160_GET_BITSLICE(int_status[0], BMI160_USER_INT_STATUS_0_STEP_INT))
+
+	if (BMI160_GET_BITSLICE(int_status[0],
+			BMI160_USER_INT_STATUS_0_STEP_INT))
 		bmi_stepdetector_interrupt_handle(client_data);
-	if (BMI160_GET_BITSLICE(int_status[1], BMI160_USER_INT_STATUS_1_FWM_INT))
+	if (BMI160_GET_BITSLICE(int_status[1],
+			BMI160_USER_INT_STATUS_1_FWM_INT))
 		bmi_fifo_watermark_interrupt_handle(client_data);
+
+	/* Clear ALL inputerrupt status after handler sig mition*/
+	/* Put this commads intot the last one*/
+	if (BMI160_GET_BITSLICE(int_status[0],
+		BMI160_USER_INT_STATUS_0_SIGMOT_INT))
+		bmi_signification_motion_interrupt_handle(client_data);
+
 }
 
 static irqreturn_t bmi_irq_handler(int irq, void *handle)
@@ -3631,21 +3616,16 @@ int bmi_probe(struct bmi_client_data *client_data, struct device *dev)
 	u8 mag_urst_len;
 #endif
 
-#if defined(BMI160_ENABLE_INT1) || defined(BMI160_ENABLE_INT2)
-	//struct bosch_sensor_specific *pdata = NULL;
-#endif
-
-
-	/* check chip id */
-	err = bmi_check_chip_id(client_data);
-	if (err)
-		goto exit_err_clean;
-
 	dev_set_drvdata(dev, client_data);
 	client_data->dev = dev;
 
 	mutex_init(&client_data->mutex_enable);
 	mutex_init(&client_data->mutex_op_mode);
+
+	/* check chip id */
+	err = bmi_check_chip_id(client_data);
+	if (err)
+		goto exit_err_clean;
 
 	/* input device init */
 	err = bmi_input_init(client_data);
@@ -3673,31 +3653,31 @@ int bmi_probe(struct bmi_client_data *client_data, struct device *dev)
 			err = -EINVAL;
 			goto exit_err_sysfs;
 		}
-	} else  {
-	if (NULL != dev->platform_data) {
-		client_data->bst_pd = kzalloc(sizeof(*client_data->bst_pd),
-				GFP_KERNEL);
+	} else {
+		if (NULL != dev->platform_data) {
+			client_data->bst_pd = kzalloc(sizeof(*client_data->bst_pd),
+					GFP_KERNEL);
 
-		if (NULL != client_data->bst_pd) {
-			memcpy(client_data->bst_pd, dev->platform_data,
+			if (NULL != client_data->bst_pd) {
+				memcpy(client_data->bst_pd, dev->platform_data,
 					sizeof(*client_data->bst_pd));
-			dev_notice(dev, "%s sensor driver set place: p%d\n",
+				dev_notice(dev, "%s sensor driver set place: p%d\n",
 					client_data->bst_pd->name,
 					client_data->bst_pd->place);
+			}
 		}
 	}
-	}
-
 
 	/* workqueue init */
 	INIT_DELAYED_WORK(&client_data->work, bmi_work_func);
 	atomic_set(&client_data->delay, BMI_DELAY_DEFAULT);
+	atomic_set(&client_data->wkqueue_en, 0);
 
 	/* h/w init */
 	client_data->device.delay_msec = bmi_delay;
 	err = BMI_CALL_API(init)(&client_data->device);
 
-	bmi_dump_reg(client_data);
+	//bmi_dump_reg(client_data);
 
 	/*power on detected*/
 	/*or softrest(cmd 0xB6) */
@@ -3721,43 +3701,49 @@ int bmi_probe(struct bmi_client_data *client_data, struct device *dev)
 	err += BMI_CALL_API(get_i2c_device_addr)(&mag_dev_addr);
 
 #ifdef BMI160_MAG_INTERFACE_SUPPORT
-		err += BMI_CALL_API(set_i2c_device_addr)(0x10);
-		//bmi160_mag_interface_init(client_data);
+		err += BMI_CALL_API(set_i2c_device_addr)(mag_dev_addr);
 		err += bmi160_magnetometer_interface_init();
 		err += bmi160_set_mag_burst(3);
 		err += bmi160_get_mag_burst(&mag_urst_len);
-		dev_info(client_data->dev, "BMI160 mag_urst_len:%d, mag_add:0x%x\n", mag_urst_len, mag_dev_addr);
+		dev_info(client_data->dev,
+			"BMI160 mag_urst_len:%d, mag_add:0x%x\n",
+			mag_urst_len, mag_dev_addr);
 #endif
 	if (err < 0)
 		goto exit_err_sysfs;
 
 
 #if defined(BMI160_ENABLE_INT1) || defined(BMI160_ENABLE_INT2)
-		client_data->gpio_pin = of_get_named_gpio_flags(dev->of_node, "bmi,gpio_irq", 0, NULL);
-		dev_info(client_data->dev, "BMI160 qpio number:%d\n", client_data->gpio_pin);
-		err += gpio_request_one(client_data->gpio_pin, GPIOF_IN, "bmi160_int");
+		client_data->gpio_pin = of_get_named_gpio_flags(dev->of_node,
+					"bmi,gpio_irq", 0, NULL);
+		dev_info(client_data->dev, "BMI160 qpio number:%d\n",
+					client_data->gpio_pin);
+		err += gpio_request_one(client_data->gpio_pin,
+					GPIOF_IN, "bmi160_int");
 		err += gpio_direction_input(client_data->gpio_pin);
 		client_data->IRQ = gpio_to_irq(client_data->gpio_pin);
 		if (err) {
-			dev_err(client_data->dev, "can not request gpio to irq number\n");
+			dev_err(client_data->dev,
+				"can not request gpio to irq number\n");
 			client_data->gpio_pin = 0;
 		}
-		
+
 
 #ifdef BMI160_ENABLE_INT1
 		/* maps interrupt to INT1/InT2 pin */
 		BMI_CALL_API(set_int_anymo)(BMI_INT0, ENABLE);
 		BMI_CALL_API(set_int_fwm)(BMI_INT0, ENABLE);
-		//BMI_CALL_API(set_int_drdy)(BMI_INT0, ENABLE);
+		/*BMI_CALL_API(set_int_drdy)(BMI_INT0, ENABLE);*/
 
 		/*Set interrupt trige level way */
 		BMI_CALL_API(set_int_edge_ctrl)(BMI_INT0, BMI_INT_LEVEL);
 		bmi160_set_int_lvl(BMI_INT0, 1);
 		/*set interrupt latch temporary, 5 ms*/
-		//bmi160_set_latch_int(5);
+		/*bmi160_set_latch_int(5);*/
 
 		BMI_CALL_API(set_output_en)(BMI160_INT1_OUTPUT_EN, ENABLE);
-		BMI_CALL_API(map_significant_motion_interrupt)(BMI160_MAP_INT1);
+		sigmotion_enable_interrupts(BMI160_MAP_INT1);
+	/*BMI_CALL_API(map_significant_motion_interrupt)(BMI160_MAP_INT1);*/
 		BMI_CALL_API(map_step_detector_interrupt)(BMI160_MAP_INT1);
 #endif
 
@@ -3767,20 +3753,26 @@ int bmi_probe(struct bmi_client_data *client_data, struct device *dev)
 		BMI_CALL_API(set_int_fwm)(BMI_INT1, ENABLE);
 		BMI_CALL_API(set_int_drdy)(BMI_INT1, ENABLE);
 
-		BMI_CALL_API(set_output_en)(BMI160_INT2_OUTPUT_EN, ENABLE);
-#endif
-		
-		
+		/*Set interrupt trige level way */
+		BMI_CALL_API(set_int_edge_ctrl)(BMI_INT1, BMI_INT_LEVEL);
+		bmi160_set_int_lvl(BMI_INT1, 1);
+		/*set interrupt latch temporary, 5 ms*/
+		/*bmi160_set_latch_int(5);*/
 
+		BMI_CALL_API(set_output_en)(BMI160_INT2_OUTPUT_EN, ENABLE);
+		sigmotion_enable_interrupts(BMI160_MAP_INT2);
+	/*BMI_CALL_API(map_significant_motion_interrupt)(BMI160_MAP_INT2);*/
+		BMI_CALL_API(map_step_detector_interrupt)(BMI160_MAP_INT2);
+#endif
 		err = request_irq(client_data->IRQ, bmi_irq_handler,
 				IRQF_TRIGGER_RISING, "bmi160", client_data);
 		if (err)
-			dev_err(client_data->dev,  "could not request irq\n");
+			dev_err(client_data->dev, "could not request irq\n");
 
 		INIT_WORK(&client_data->irq_work, bmi_irq_work_func);
 #endif
 
-	client_data->wkqueue_en = 0x00;
+
 	client_data->fifo_data_sel = 0;
 	BMI_CALL_API(get_acc_outputdatarate)(&client_data->odr.acc_odr);
 	BMI_CALL_API(get_gyro_outputdatarate)(&client_data->odr.gyro_odr);
@@ -3794,6 +3786,9 @@ int bmi_probe(struct bmi_client_data *client_data, struct device *dev)
 		goto exit_err_sysfs;
 	}
 
+	dev_notice(dev, "sensor_time:%d, %d",
+		sensortime_duration_tbl[0].ts_delat,
+		sensortime_duration_tbl[0].ts_duration_lsb);
 	dev_notice(dev, "sensor %s probed successfully", SENSOR_NAME);
 
 	return 0;
@@ -3809,12 +3804,6 @@ exit_err_clean:
 				kfree(client_data->bst_pd);
 				client_data->bst_pd = NULL;
 			}
-			if (NULL != client_data->fifo_data) {
-				kfree(client_data->fifo_data);
-				client_data->fifo_data = NULL;
-			}
-			kfree(client_data);
-			client_data = NULL;
 		}
 	}
 
@@ -3871,7 +3860,9 @@ static int bmi_post_resume(struct bmi_client_data *client_data)
 	int err = 0;
 
 	mutex_lock(&client_data->mutex_enable);
-	if (client_data->wkqueue_en) {
+
+	if (atomic_read(&client_data->wkqueue_en) == 1) {
+		bmi160_set_acc_op_mode(client_data, BMI_ACC_PM_NORMAL);
 		schedule_delayed_work(&client_data->work,
 				msecs_to_jiffies(
 					atomic_read(&client_data->delay)));
@@ -3889,32 +3880,35 @@ int bmi_suspend(struct device *dev)
 	unsigned char stc_enable;
 	dev_err(client_data->dev, "bmi suspend function entrance");
 
-
-	if (client_data->wkqueue_en)
+	if (atomic_read(&client_data->wkqueue_en) == 1) {
+		bmi160_set_acc_op_mode(client_data, BMI_ACC_PM_SUSPEND);
 		cancel_delayed_work_sync(&client_data->work);
-
+	}
 	BMI_CALL_API(get_step_counter_enable)(&stc_enable);
-	
-	if (client_data->pw.acc_pm == BMI_ACC_PM_SUSPEND && (stc_enable != 1)) {
+
+	if (client_data->pw.acc_pm != BMI_ACC_PM_SUSPEND && (stc_enable != 1)) {
 		err += BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_SUSPEND]);
-		client_data->pw.acc_pm = BMI_ACC_PM_SUSPEND;
+		//client_data->pw.acc_pm = BMI_ACC_PM_SUSPEND;
 		mdelay(3);
 	}
 	if (client_data->pw.gyro_pm != BMI_GYRO_PM_SUSPEND) {
 		err += BMI_CALL_API(set_command_register)
 				(bmi_pmu_cmd_gyro_arr[BMI_GYRO_PM_SUSPEND]);
-		client_data->pw.gyro_pm = BMI_GYRO_PM_SUSPEND;
+		//client_data->pw.gyro_pm = BMI_GYRO_PM_SUSPEND;
 		mdelay(3);
 	}
-	
-	if(client_data->pw.mag_pm != BMI_MAG_PM_SUSPEND)
-	{
-		bmi160_set_mag_and_secondary_if_powermode(BMI160_MAG_SUSPEND_MODE);
-		client_data->pw.gyro_pm = BMI160_MAG_SUSPEND_MODE;
+
+	if (client_data->pw.mag_pm != BMI_MAG_PM_SUSPEND) {
+		bmi160_set_mag_and_secondary_if_powermode
+					(BMI160_MAG_SUSPEND_MODE);
+		//client_data->pw.mag_pm = BMI160_MAG_SUSPEND_MODE;
 		mdelay(3);
-		
 	}
+
+	pr_debug("pw_acc=%u, pw_gyro=%u, pw_mag=%u\n",
+			client_data->pw.acc_pm,
+			client_data->pw.gyro_pm, client_data->pw.mag_pm);
 
 	return err;
 }
@@ -3924,10 +3918,28 @@ int bmi_resume(struct device *dev)
 {
 	int err = 0;
 	struct bmi_client_data *client_data = dev_get_drvdata(dev);
+
+	pr_debug("enter...\n");
+
+	if (client_data->pw.acc_pm != BMI_ACC_PM_SUSPEND) {
+		err += BMI_CALL_API(set_command_register)
+			(bmi_pmu_cmd_acc_arr[BMI_ACC_PM_NORMAL]);
+		mdelay(3);
+	}
+
+	if (client_data->pw.gyro_pm != BMI_GYRO_PM_SUSPEND) {
+		err += BMI_CALL_API(set_command_register)
+			(bmi_pmu_cmd_gyro_arr[BMI_GYRO_PM_NORMAL]);
+		mdelay(3);
+	}
 	/* post resume operation */
 	err = bmi_post_resume(client_data);
 
+	pr_debug("pw_acc=%u, pw_gyro=%u, pw_mag=%u\n",
+			client_data->pw.acc_pm,
+			client_data->pw.gyro_pm, client_data->pw.mag_pm);
 	return err;
 }
 EXPORT_SYMBOL(bmi_resume);
+
 

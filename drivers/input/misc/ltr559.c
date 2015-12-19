@@ -43,7 +43,6 @@
 #include <linux/wakelock.h>
 #endif
 
-#define SENSOR_NAME			"proximity"
 #define LTR559_DRV_NAME		"ltr559"
 #define LTR559_MANUFAC_ID	0x05
 
@@ -358,6 +357,7 @@ static int ltr559_ps_enable(struct i2c_client *client, int on)
 	struct ltr559_data *data = i2c_get_clientdata(client);
 	int ret=0;
 	int contr_data;
+	int psval_lo, psval_hi, psdata;
 
 	if (on) {
 		ltr559_set_ps_threshold(client, LTR559_PS_THRES_LOW_0, 0);
@@ -375,9 +375,18 @@ static int ltr559_ps_enable(struct i2c_client *client, int on)
 
 		msleep(WAKEUP_DELAY+20);
 
-		data->ps_state = 1;
-		input_report_abs(data->input_dev_ps, ABS_DISTANCE, data->ps_state);
-                input_sync(data->input_dev_ps);
+		psval_lo = i2c_smbus_read_byte_data(data->client, LTR559_PS_DATA_0);
+		psval_hi = i2c_smbus_read_byte_data(data->client, LTR559_PS_DATA_1);
+		if ((psval_lo>=0) && (psval_hi>=0)) {
+			psdata = ((psval_hi & 7) << 8) | psval_lo;
+			if (psdata >= data->platform_data->prox_threshold)		
+				input_report_abs(data->input_dev_ps, ABS_DISTANCE, 0);
+			else if (psdata <= data->platform_data->prox_hsyteresis_threshold)
+				input_report_abs(data->input_dev_ps, ABS_DISTANCE, 1);
+
+			//input_report_abs(data->input_dev_ps, ABS_DISTANCE, data->ps_state);
+			input_sync(data->input_dev_ps);
+		}
 #if defined(CONFIG_L9100_COMMON)
               ltr559_ps_dynamic_caliberate(&data->ps_cdev);
 #endif
@@ -393,7 +402,7 @@ static int ltr559_ps_enable(struct i2c_client *client, int on)
 			return -EFAULT;
 		}
 	}
-	//pr_err("%s: enable=(%d) OK\n", __func__, on);
+	//pr_err("%s: enable=%d OK\n", __func__, on);
 	return ret;
 }
 
@@ -477,7 +486,7 @@ static void ltr559_ps_work_func(struct work_struct *work)
 	struct i2c_client *client=data->client;
 	int als_ps_status;
 	int psval_lo, psval_hi, psdata;
-	static u32 ps_state_last = 1;	// xuke @ 20140828	Far as default.
+	static u32 ps_state_last = 2;	// xuke @ 20140828	Far as default.
 
 	mutex_lock(&data->op_lock);
 
@@ -523,14 +532,14 @@ static void ltr559_ps_work_func(struct work_struct *work)
 				  data->dynamic_noise = psdata;
 				  if(psdata < 100) {
 				  }else if(psdata < 200){
-					  data->platform_data->prox_threshold = psdata+130;
-					  data->platform_data->prox_hsyteresis_threshold = psdata+60;
+					  data->platform_data->prox_threshold = psdata+230;
+					  data->platform_data->prox_hsyteresis_threshold = psdata+180;
 				  }else if(psdata < 500){
-					  data->platform_data->prox_threshold = psdata+150;
-					  data->platform_data->prox_hsyteresis_threshold = psdata+80;
+					  data->platform_data->prox_threshold = psdata+280;
+					  data->platform_data->prox_hsyteresis_threshold = psdata+230;
 				  }else if(psdata < 1500){
-					  data->platform_data->prox_threshold = psdata+300;
-					  data->platform_data->prox_hsyteresis_threshold = psdata+150;
+					  data->platform_data->prox_threshold = psdata+420;
+					  data->platform_data->prox_hsyteresis_threshold = psdata+350;
 				  }else{						
 					  data->platform_data->prox_threshold= 1800;
 					  data->platform_data->prox_hsyteresis_threshold= 1700;
@@ -712,6 +721,30 @@ static ssize_t ltr559_store_enable_als(struct device *dev,
 	return size;
 }
 
+static ssize_t ltr559_show_delay_als(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct ltr559_data *data = dev_get_drvdata(dev);
+	return sprintf(buf, "%u\n", data->platform_data->als_poll_interval);
+}
+
+static ssize_t ltr559_store_delay_als(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t size)
+{
+	unsigned long val;
+	struct ltr559_data *data = dev_get_drvdata(dev);
+
+	val = simple_strtoul(buf, NULL, 10);
+
+	if (data->als_cdev.sensors_poll_delay) {
+		//data->als_cdev.sensors_poll_delay(&data->als_cdev, val);
+		pr_info("%s: set als_poll_delay = %lu\n", __func__, val);
+	}
+
+	return size;
+}
+
 static ssize_t ltr559_driver_info_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -811,26 +844,37 @@ static ssize_t ltr559_show_lux_data(struct device *dev,
 
 static DEVICE_ATTR(debug_regs, SYS_AUTHORITY, ltr559_show_debug_regs,
 				ltr559_store_debug_regs);
-static DEVICE_ATTR(enable_als_sensor, SYS_AUTHORITY, ltr559_show_enable_als,
+static DEVICE_ATTR(als_enable, SYS_AUTHORITY, ltr559_show_enable_als,
 				ltr559_store_enable_als);
-static DEVICE_ATTR(enable, SYS_AUTHORITY, ltr559_show_enable_ps,
+static DEVICE_ATTR(als_poll_delay, SYS_AUTHORITY, ltr559_show_delay_als,
+				ltr559_store_delay_als);
+static DEVICE_ATTR(ps_enable, SYS_AUTHORITY, ltr559_show_enable_ps,
 				ltr559_store_enable_ps);
 static DEVICE_ATTR(info, S_IRUGO, ltr559_driver_info_show, NULL);
 static DEVICE_ATTR(raw_adc, S_IRUGO, ltr559_show_adc_data, NULL);
 static DEVICE_ATTR(lux_adc, S_IRUGO, ltr559_show_lux_data, NULL);
 
-static struct attribute *ltr559_attributes[] = {
-		&dev_attr_enable.attr,
+static struct attribute *ltr559_als_attributes[] = {
 		&dev_attr_info.attr,
-		&dev_attr_enable_als_sensor.attr,
+		&dev_attr_als_enable.attr,
+		&dev_attr_als_poll_delay.attr,
 		&dev_attr_debug_regs.attr,
 		&dev_attr_raw_adc.attr,
 		&dev_attr_lux_adc.attr,
 		NULL,
 };
+static const struct attribute_group ltr559_als_attr_group = {
+		.attrs = ltr559_als_attributes,
+};
 
-static const struct attribute_group ltr559_attr_group = {
-		.attrs = ltr559_attributes,
+static struct attribute *ltr559_ps_attributes[] = {
+		&dev_attr_ps_enable.attr,
+		&dev_attr_info.attr,
+		&dev_attr_debug_regs.attr,
+		NULL,
+};
+static const struct attribute_group ltr559_ps_attr_group = {
+		.attrs = ltr559_ps_attributes,
 };
 
 static int ltr559_als_set_poll_delay(struct ltr559_data *data,unsigned long delay)
@@ -948,14 +992,14 @@ static ssize_t ltr559_ps_dynamic_caliberate(struct sensors_classdev *sensors_cde
 //add end
 
    if(noise < 200){
-	   pdata->prox_threshold = noise+130;
-	   pdata->prox_hsyteresis_threshold = noise+60;
+	   pdata->prox_threshold = noise+230;
+	   pdata->prox_hsyteresis_threshold = noise+180;
    }else if(noise < 500){
-	   pdata->prox_threshold = noise+150;
-	   pdata->prox_hsyteresis_threshold = noise+80;
+	   pdata->prox_threshold = noise+280;
+	   pdata->prox_hsyteresis_threshold = noise+230;
    }else if(noise < 1500){
-	   pdata->prox_threshold = noise+300;
-	   pdata->prox_hsyteresis_threshold = noise+150;
+	   pdata->prox_threshold = noise+420;
+	   pdata->prox_hsyteresis_threshold = noise+350;
    }else{	
 	   pdata->prox_threshold = 1800;
 	   pdata->prox_hsyteresis_threshold = 1700;
@@ -972,8 +1016,10 @@ static ssize_t ltr559_ps_dynamic_caliberate(struct sensors_classdev *sensors_cde
 	}
 
 	data->cali_update = true;
-	
-	printk("%s: noise=%d, thd_val_low=%d, htd_val_high=%d\n",__func__, noise, pdata->prox_hsyteresis_threshold, pdata->prox_threshold);
+
+	pr_warn("%s: noise=%d, thd_val_low=%d, htd_val_high=%d\n",
+		__func__, noise,
+		pdata->prox_hsyteresis_threshold, pdata->prox_threshold);
 	return 0;
 }
 #endif
@@ -997,16 +1043,15 @@ static int ltr559_ps_set_enable(struct sensors_classdev *sensors_cdev,
 
 #if defined(CONFIG_L9100_COMMON)
 	if (enable == 1) {
- 		wake_lock(&data->ltr559_ps_wakelock);
+		wake_lock(&data->ltr559_ps_wakelock);
 		irq_set_irq_wake(data->irq, 1);
 	} else if (enable == 0) {
 		irq_set_irq_wake(data->irq, 0);
- 		wake_unlock(&data->ltr559_ps_wakelock);
+		wake_unlock(&data->ltr559_ps_wakelock);
 	}
 #endif
-
 	data->ps_open_state = enable;
-	pr_err("%s: enable=%u, ps_open_state=%u\n", __func__, enable, data->ps_open_state);
+	pr_info("%s: ps_open_state = %u\n", __func__, data->ps_open_state);
 	return ret;
 }
 
@@ -1097,6 +1142,9 @@ static int ltr559_read_ps_value_for_double_tap(void)
 int ltr559_get_ps_value_for_double_tap(void)
 {
 	int tp_double_tap = 1;
+
+	if (!double_tap_data)
+		return 0;
 
 	if (!double_tap_data->ps_open_state) {
 		ltr559_ps_enable(double_tap_data->client,1);
@@ -1445,7 +1493,7 @@ int ltr559_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	input_set_abs_params(data->input_dev_als, ABS_MISC, 0, 65535, 0, 0);
 	input_set_abs_params(data->input_dev_ps, ABS_DISTANCE, 0, 1, 0, 0);
 
-#if defined(CONFIG_L9100_COMMON)
+#if defined(CONFIG_SENSORS_BMM050)
 	data->input_dev_als->name = "ltr559-ls";
 	data->input_dev_ps->name = "ltr559-ps";
 #else
@@ -1453,9 +1501,9 @@ int ltr559_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	data->input_dev_ps->name = "proximity";
 #endif
 	data->input_dev_als->id.bustype = BUS_I2C;
-	data->input_dev_als->dev.parent =&data->client->dev;
+	//data->input_dev_als->dev.parent =&data->client->dev;
 	data->input_dev_ps->id.bustype = BUS_I2C;
-	data->input_dev_ps->dev.parent =&data->client->dev;
+	//data->input_dev_ps->dev.parent =&data->client->dev;
 
 	input_set_drvdata(data->input_dev_als, data);
 	input_set_drvdata(data->input_dev_ps, data);
@@ -1484,13 +1532,9 @@ int ltr559_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	mutex_init(&data->op_lock);
 
 	/* create sysfs group */
-	ret = sysfs_create_group(&client->dev.kobj, &ltr559_attr_group);
-
-#if defined(CONFIG_L9100_COMMON)
-    ret = sysfs_create_group(&data->input_dev_als->dev.kobj, &ltr559_attr_group);
-	ret = sysfs_create_group(&data->input_dev_ps->dev.kobj, &ltr559_attr_group);
-#endif
-
+	//ret = sysfs_create_group(&client->dev.kobj, &ltr559_attr_group);
+	ret = sysfs_create_group(&data->input_dev_als->dev.kobj, &ltr559_als_attr_group);
+	ret = sysfs_create_group(&data->input_dev_ps->dev.kobj, &ltr559_ps_attr_group);
 	if (ret){
 		ret = -EROFS;
 		dev_err(&client->dev,"Unable to creat sysfs group\n");
@@ -1534,11 +1578,10 @@ int ltr559_probe(struct i2c_client *client, const struct i2c_device_id *id)
 exit_unregister_als_class:
 	sensors_classdev_unregister(&data->als_cdev);
 exit_remove_sysfs_group:
-	sysfs_remove_group(&client->dev.kobj, &ltr559_attr_group);
-#if defined(CONFIG_L9100_COMMON)
-	sysfs_remove_group(&data->input_dev_als->dev.kobj, &ltr559_attr_group);
-	sysfs_remove_group(&data->input_dev_ps->dev.kobj, &ltr559_attr_group);
-#endif
+	//sysfs_remove_group(&client->dev.kobj, &ltr559_attr_group);
+	sysfs_remove_group(&data->input_dev_als->dev.kobj, &ltr559_als_attr_group);
+	sysfs_remove_group(&data->input_dev_ps->dev.kobj, &ltr559_als_attr_group);
+
 exit_unregister_dev_ps:
 	input_unregister_device(data->input_dev_ps);
 exit_unregister_dev_als:
@@ -1590,11 +1633,9 @@ static int ltr559_remove(struct i2c_client *client)
 	
 	ltr559_gpio_irq_free(data);
 	
-	sysfs_remove_group(&client->dev.kobj, &ltr559_attr_group);	
-#if defined(CONFIG_L9100_COMMON)
-	sysfs_remove_group(&data->input_dev_als->dev.kobj, &ltr559_attr_group);
-	sysfs_remove_group(&data->input_dev_ps->dev.kobj, &ltr559_attr_group);
-#endif
+	//sysfs_remove_group(&client->dev.kobj, &ltr559_attr_group);
+	sysfs_remove_group(&data->input_dev_als->dev.kobj, &ltr559_als_attr_group);
+	sysfs_remove_group(&data->input_dev_ps->dev.kobj, &ltr559_ps_attr_group);
 
 	cancel_delayed_work_sync(&data->ps_work);
 	cancel_delayed_work_sync(&data->als_work);

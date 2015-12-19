@@ -6,10 +6,10 @@
  * Public License (GPL).Version 2,June 1991,
  * available at http://www.fsf.org/copyleft/gpl.html
  *
- * @filename $filename$
+ * @filename bmi160_i2c.c
  * @date     2014/11/25 14:40
- * @id       $id$
- * @version  1.0
+ * @id       "b3ccb9e"
+ * @version  1.2
  *
  * @brief
  * This file implements moudle function, which add
@@ -24,7 +24,6 @@
 /*! @defgroup bmi160_i2c_src
  *  @brief bmi160 i2c driver module
  @{*/
-#define BMI_USE_BASIC_I2C_FUNC
 
 static struct i2c_client *bmi_client;
 /*!
@@ -253,7 +252,7 @@ static int bmi_i2c_probe(struct i2c_client *client,
 		int err = 0;
 		struct bmi_client_data *client_data = NULL;
 
-		dev_info(&client->dev, "BMI160 i2c function probe entrance");
+		dev_info(&client->dev, "BMI160 i2c function probe entrance (new)");
 
 		if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 			dev_err(&client->dev, "i2c_check_functionality error!");
@@ -328,7 +327,7 @@ MODULE_DEVICE_TABLE(i2c, bmi_id);
 static const struct of_device_id bmi160_of_match[] = {
 	{ .compatible = "bosch-sensortec,bmi160", },
 	{ .compatible = "bmi160", },
-	{ .compatible = "bosch, bmi160", },
+	{ .compatible = "bosch,bmi160", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, bmi160_of_match);
