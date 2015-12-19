@@ -34,7 +34,7 @@
 		i2c5 = &i2c_5;
 		i2c6 = &i2c_6;
                 //spi0 = &spi_0; // yht remove it
-		spi5 = &spi_5;
+		//spi5 = &spi_5;
 	};
 
 	memory {
@@ -1014,7 +1014,7 @@
 			wlf,SPKVDDR-voltage = <1800000 1800000>;
 			wlf,SPKVDDR-current = <25000>;
 			wlf,clk32k_src = <2>;
-			wlf,micd_bias_start_time = <10>;
+			wlf,micd_bias_start_time = <7>;
 			wlf,infinite_micd = <1>;
 			wlf,micd-rate = <6>;
 			wlf,micd-configs = <0x0000 2 1>;

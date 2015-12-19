@@ -16,6 +16,8 @@
 #include "msm8939-qrd-skuk.dtsi"
 
 / {
+	model = "Qualcomm Technologies, Inc. MSM8939 QRD SKUK";
+	compatible = "qcom,msm8939-qrd-skuk", "qcom,msm8939-qrd", "qcom,msm8939", "qcom,qrd";
 	qcom,board-id = <0x1000b 5>, <0x2000b 5>;
 };
 
@@ -43,7 +45,7 @@
 		qcom,fg-delta-soc = <1>;
                 qcom,fg-soc-min = <3>;
 
-		qcom,fg-cutoff-voltage-mv = <3450>;
+		qcom,fg-cutoff-voltage-mv = <3400>;
 		qcom,fg-iterm-ma = <100>;
 		qcom,fg-ibatt-standby-ma = <200>;
 		qcom,fg-cc-to-cv-mv = <4397>;
@@ -62,6 +64,8 @@
 		qcom,empty-soc-disabled;
 		regulator-name = "smb1360_otg_vreg";
 		qcom,awake-min-soc;
+		qcom,cfg-current-limited = <1100>;
+		qcom,bat-ovp-end-chg-disabled;
                 qcom,otp-hard-jeita-config;
 		qcom,otp-hot-bat-decidegc = <550>;
 		qcom,otp-cold-bat-decidegc = <0>;

@@ -97,22 +97,6 @@ i2c_3: i2c@78b7000 { /* BLSP1 QUP3 */
 			ltr,als-polling-time = <200>;
 		};
 
-		bosch@18 { /* Accelerometer sensor */
-			compatible = "bosch,bma2x2";
-			reg = <0x18>;
-			pinctrl-names = "bma_default","bma_sleep";
-			pinctrl-0 = <&bma2x2_int1_default &bma2x2_int2_default>;
-			pinctrl-1 = <&bma2x2_int1_sleep &bma2x2_int2_sleep>;
-			interrupt-parent = <&msm_gpio>;
-			interrupts = <68 0x2002>;
-			vdd-supply = <&pm8916_l17>;
-			vio-supply = <&pm8916_l6>;
-			bosch,init-interval = <200>;
-			bosch,place = <2>;
-			bosch,gpio-int1 = <&msm_gpio 108 0x2002>;
-			bosch,gpio-int2 = <&msm_gpio 115 0x2002>;
-		};
-
 		bosch@68 { /* Gyroscope and accelerometer sensor combo */
 			compatible = "bosch, bmi160";
 			reg = <0x68>;
@@ -130,7 +114,7 @@ i2c_3: i2c@78b7000 { /* BLSP1 QUP3 */
 			pinctrl-names = "default","sleep";
 			pinctrl-0 = <&akm09911_default>;
 			pinctrl-1 = <&akm09911_sleep>;
-			akm,place = <1>;
+			akm,place = <2>;
 			akm,auto-report;
 		};
 	};
@@ -355,22 +339,6 @@ i2c_3: i2c@78b7000 { /* BLSP1 QUP3 */
 		avago,ga-value = <560>;
 	};
 
-	bosch@18 { // Accelerometer sensor
-		compatible = "bosch,bma2x2";
-		reg = <0x18>;
-		pinctrl-names = "bma_default","bma_sleep";
-		pinctrl-0 = <&bma2x2_int1_default &bma2x2_int2_default>;
-		pinctrl-1 = <&bma2x2_int1_sleep &bma2x2_int2_sleep>;
-		interrupt-parent = <&msm_gpio>;
-		interrupts = <112 0x2002>;
-		vdd-supply = <&pm8916_l17>;
-		vio-supply = <&pm8916_l6>;
-		bosch,init-interval = <200>;
-		bosch,place = <2>;
-		bosch,gpio-int1 = <&msm_gpio 112 0x2002>;
-		bosch,gpio-int2 = <&msm_gpio 114 0x2002>;
-	};
-
 	memsic@30 { // Magnetic field sensor
 		compatible = "memsic,mmc3416x";
 		reg = <0x30>;
@@ -538,7 +506,7 @@ i2c_3: i2c@78b7000 { /* BLSP1 QUP3 */
 	pinctrl-0 = <&mdss_dsi_active &mdss_te_active>;
 	pinctrl-1 = <&mdss_dsi_suspend &mdss_te_suspend>;
 
-	qcom,platform-enable-gpio = <&msm_gpio 34 0>;
+	//qcom,platform-enable-gpio = <&msm_gpio 34 0>;
 	qcom,platform-reset-gpio = <&msm_gpio 25 0>;
 	qcom,platform-bklight-en-gpio = <&msm_gpio 98 0>;
 
