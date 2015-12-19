@@ -6081,6 +6081,10 @@ static const struct file_operations fts_gesture_proc_fops= {
 };
 #endif
 
+#ifdef CONFIG_L9100_COMMON
+static struct mxt_data *g_mxt_data;
+#endif
+
 extern int is_tp_driver_loaded ;
 static int  mxt_probe(struct i2c_client *client,
 					const struct i2c_device_id *id)
@@ -6110,6 +6114,9 @@ static int  mxt_probe(struct i2c_client *client,
 	data->irq = client->irq;
 	i2c_set_clientdata(client, data);
 
+#ifdef CONFIG_L9100_COMMON
+	g_mxt_data = data;
+#endif
 	mutex_init(&data->bus_access_mutex);
 #if defined(CONFIG_MXT_I2C_DMA)
 	client->addr |= I2C_RS_FLAG | I2C_ENEXT_FLAG | I2C_DMA_FLAG;
@@ -6365,6 +6372,11 @@ static int mxt_suspend(struct device *dev)
 	struct mxt_data *data = i2c_get_clientdata(client);
 	struct input_dev *input_dev = data->input_dev;
 
+	if (data->suspended) {
+		pr_info("%s: already suspended, return\n", __func__);
+		return 0;
+	}
+
 #if defined(CONFIG_ESD_CHECK_A_REGISTER)
 	suspend_flag = 1;//stop esd check
 #endif
@@ -6393,6 +6405,11 @@ static int mxt_resume(struct device *dev)
 	dev_info(dev, "mxt_resume\n");
 #endif
 
+	if (!data->suspended) {
+		pr_info("%s: already resumed, return\n", __func__);
+		return 0;
+	}
+
 #if defined(CONFIG_ESD_CHECK_A_REGISTER)
         suspend_flag = 0;
         wake_up_interruptible(&esd_waiter);//zbl add to wake up esd check
@@ -6410,6 +6427,35 @@ static int mxt_resume(struct device *dev)
 
 	return 0;
 }
+
+#ifdef CONFIG_L9100_COMMON
+void mxt_update_backlight(u32 bl)
+{
+	int ret;
+	static u32 pre_bl;
+	struct mxt_data *mxt = g_mxt_data;
+
+	if (!mxt) {
+		pr_err("%s: mxt is null !\n", __func__);
+		return;
+	}
+
+	//pr_info("%s: bl = %u\n", __func__, bl);
+	if (bl == 0) {
+		ret = mxt_suspend(&mxt->client->dev);
+		if (ret != 0)
+			pr_err("%s: suspend failed !\n", __func__);
+	} else {
+		if ((mxt->suspended) && (pre_bl == 0)) {
+			ret = mxt_resume(&mxt->client->dev);
+			if (ret != 0)
+				pr_err("%s: resume failed !\n", __func__);
+		}
+	}
+	pre_bl = bl;
+}
+EXPORT_SYMBOL(mxt_update_backlight);
+#endif
 
 #if defined(CONFIG_FB_PM)
 static int fb_notifier_callback(struct notifier_block *self,
