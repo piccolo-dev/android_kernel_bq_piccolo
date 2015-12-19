@@ -3847,6 +3847,8 @@ static irqreturn_t msm_id_irq(int irq, void *data)
 {
 	struct msm_otg *motg = data;
 
+	printk("--------otg_irq handler------\n");
+
 	if (test_bit(MHL, &motg->inputs) ||
 			mhl_det_in_progress) {
 		pr_debug("PMIC: Id interrupt ignored in MHL\n");
@@ -4813,7 +4815,6 @@ struct msm_otg_platform_data *msm_otg_dt_to_pdata(struct platform_device *pdev)
 	if (pdata->usb_id_gpio < 0)
 		pr_debug("usb_id_gpio is not available\n");
 
-#if defined(CONFIG_L9100_COMMON)
     pdata->usbid_switch = of_get_named_gpio(node, "qcom,usbid-switch", 0);
     if (pdata->usbid_switch < 0)
         pr_debug("usbid_switch is not available\n");
@@ -4821,7 +4822,7 @@ struct msm_otg_platform_data *msm_otg_dt_to_pdata(struct platform_device *pdev)
         gpio_request(pdata->usbid_switch, "USB_ID_SWITCH");
         gpio_direction_output(pdata->usbid_switch, 1);
     }
-#endif
+
 	pdata->l1_supported = of_property_read_bool(node,
 				"qcom,hsusb-l1-supported");
 	pdata->enable_ahb2ahb_bypass = of_property_read_bool(node,
