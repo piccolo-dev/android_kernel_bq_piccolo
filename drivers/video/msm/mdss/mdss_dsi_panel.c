@@ -1603,6 +1603,7 @@ static int mdss_panel_parse_dt(struct device_node *np,
 		"qcom,mdss-dsi-rx-eot-ignore");
 	pinfo->mipi.tx_eot_append = of_property_read_bool(np,
 		"qcom,mdss-dsi-tx-eot-append");
+	pr_info("%s: tx_eot_append = %d\n", __func__, pinfo->mipi.tx_eot_append);
 
 	rc = of_property_read_u32(np, "qcom,mdss-dsi-stream", &tmp);
 	pinfo->mipi.stream = (!rc ? tmp : 0);
