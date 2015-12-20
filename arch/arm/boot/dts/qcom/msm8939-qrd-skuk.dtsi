@@ -98,7 +98,7 @@ i2c_3: i2c@78b7000 { /* BLSP1 QUP3 */
 		};
 
 		bosch@68 { /* Gyroscope and accelerometer sensor combo */
-			compatible = "bosch, bmi160";
+			compatible = "bosch,bmi160";
 			reg = <0x68>;
 			vdd-supply = <&pm8916_l17>;
 			vio-supply = <&pm8916_l6>;
