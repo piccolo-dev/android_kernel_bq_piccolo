@@ -388,7 +388,7 @@ static int ltr559_ps_enable(struct i2c_client *client, int on)
 			input_sync(data->input_dev_ps);
 		}
 #if defined(CONFIG_L9100_COMMON)
-              ltr559_ps_dynamic_caliberate(&data->ps_cdev);
+		ltr559_ps_dynamic_caliberate(&data->ps_cdev);
 #endif
 	} else {
 		ret = i2c_smbus_write_byte_data(client, LTR559_PS_CONTR, MODE_PS_StdBy);
@@ -559,7 +559,7 @@ static void ltr559_ps_work_func(struct work_struct *work)
 			data->ps_state = ps_state_last;
 		}
 
-                printk("%s: ps_state_last = %u, ps_state = %u\n", __func__, ps_state_last, data->ps_state);
+		printk("%s: ps_state_last = %u, ps_state = %u\n", __func__, ps_state_last, data->ps_state);
 		if((ps_state_last != data->ps_state) || (data->ps_state == 0)) //need report the input event constant when near 
 		{
 			input_report_abs(data->input_dev_ps, ABS_DISTANCE, data->ps_state);
@@ -569,7 +569,7 @@ static void ltr559_ps_work_func(struct work_struct *work)
 			ps_state_last = data->ps_state; 	// xuke @ 20140828	Report ABS value only if the state changed.
 		}
 		else
-			printk("%s, ps_state still %s\n", __func__, data->ps_state ? "far" : "near");
+			printk("%s: ps_state still %s\n", __func__, data->ps_state ? "far" : "near");
 	}
 workout:
 	enable_irq(data->irq);
@@ -625,10 +625,10 @@ static irqreturn_t ltr559_irq_handler(int irq, void *arg)
 static int ltr559_gpio_irq(struct ltr559_data *data)
 {
         struct device_node *np = data->client->dev.of_node;
-	 int err = 0;
+		int err = 0;
 
         data->platform_data->int_gpio = of_get_named_gpio_flags(np, "ltr,irq-gpio", 0, &data->platform_data->irq_gpio_flags);
-        if (data->platform_data->int_gpio < 0)
+		if (data->platform_data->int_gpio < 0)
                 return -EIO;
 
         if (gpio_is_valid(data->platform_data->int_gpio)) {
@@ -640,12 +640,12 @@ static int ltr559_gpio_irq(struct ltr559_data *data)
 
                 err = gpio_direction_input(data->platform_data->int_gpio);
                 if (err) {
-                        printk("%s set_direction for irq gpio failed\n",__func__);
-			return -EIO;
+					printk("%s set_direction for irq gpio failed\n",__func__);
+					return -EIO;
                 }
         }
 
-	data->irq = data->client->irq = gpio_to_irq(data->platform_data->int_gpio);
+		data->irq = data->client->irq = gpio_to_irq(data->platform_data->int_gpio);
 
         if (request_irq(data->irq, ltr559_irq_handler, IRQ_TYPE_LEVEL_LOW/*IRQF_DISABLED|IRQ_TYPE_EDGE_FALLING*/,
                 LTR559_DRV_NAME, data)) {
@@ -653,7 +653,7 @@ static int ltr559_gpio_irq(struct ltr559_data *data)
 		return -EINTR;
         }
 
-        irq_set_irq_wake(data->irq, 1);
+        //irq_set_irq_wake(data->irq, 1);
 
         printk(KERN_INFO "%s: INT No. %d", __func__, data->irq);
         return 0;
